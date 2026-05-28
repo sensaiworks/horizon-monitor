@@ -50,12 +50,14 @@ async def _run_monitor(config: dict, dry_run: bool) -> None:
     from src.mcp_client import HorizonMCPClient
     from src.poller import Poller
     from src.extractor import Extractor
+    from src.rag import RAGPipeline
 
     mcp_cfg = config["mcp"]
     poll_cfg = config["polling"]
     win_cfg = config["windows"]
     claude_cfg = config["claude"]
     user_cfg = config["user"]
+    rag_cfg = config["rag"]
 
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
 
@@ -64,6 +66,15 @@ async def _run_monitor(config: dict, dry_run: bool) -> None:
         model=claude_cfg["vision_model"],
         user_display_name=user_cfg["display_name"],
     )
+
+    rag = RAGPipeline(
+        db_path=rag_cfg["db_path"],
+        collection_name=rag_cfg["collection_name"],
+        embedding_provider=rag_cfg["embedding_provider"],
+        voyage_api_key=os.environ.get("VOYAGE_API_KEY") or None,
+        top_k=rag_cfg["top_k"],
+    )
+    rag.connect()
 
     async with HorizonMCPClient(
         server_path=mcp_cfg["server_path"],
@@ -86,6 +97,10 @@ async def _run_monitor(config: dict, dry_run: bool) -> None:
                 print(f"  [{ev.app}] {ev.speaker}: {ev.message[:80]}{tag}", flush=True)
             if not events:
                 print("  (no chat messages detected)", flush=True)
+            elif not dry_run:
+                added = rag.ingest(events)
+                if added:
+                    print(f"  RAG: +{added} stored", flush=True)
 
         print(f"Starting monitor (dry_run={dry_run}, interval={poll_cfg['interval_seconds']}s) — Ctrl+C to stop", flush=True)
         await poller.run(on_change=on_change, dry_run=dry_run)

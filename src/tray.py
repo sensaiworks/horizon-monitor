@@ -13,9 +13,9 @@ the main thread (required by pystray on Windows).
 from __future__ import annotations
 
 import asyncio
+import os
 import queue
 import threading
-from typing import TYPE_CHECKING
 
 from PIL import Image, ImageDraw
 import pystray
@@ -25,6 +25,7 @@ from .mcp_client import HorizonMCPClient
 from .models import MessageEvent
 from .notifier import Notifier
 from .poller import Poller
+from .rag import RAGPipeline
 
 _STATUS_COLORS = {
     "monitoring": (34, 197, 94),
@@ -173,6 +174,17 @@ class TrayApp:
             enabled=cfg["notifications"]["enabled"],
             cooldown_minutes=cfg["notifications"]["cooldown_minutes"],
         )
+        rag_cfg = cfg["rag"]
+        voyage_key = os.environ.get("VOYAGE_API_KEY") or None
+        rag = RAGPipeline(
+            db_path=rag_cfg["db_path"],
+            collection_name=rag_cfg["collection_name"],
+            embedding_provider=rag_cfg["embedding_provider"],
+            voyage_api_key=voyage_key,
+            top_k=rag_cfg["top_k"],
+        )
+        rag.connect()
+
         poll = cfg["polling"]
         win = cfg["windows"]
 
@@ -191,6 +203,10 @@ class TrayApp:
                 for ev in events:
                     self._event_queue.put(ev)
                     notifier.notify_if_needed(ev)
+                if events:
+                    added = rag.ingest(events)
+                    if added:
+                        print(f"RAG: ingested {added} new event(s)", flush=True)
 
             await poller.run(on_change=on_change, stop=self._stop_ev, pause=self._pause_ev)
 
