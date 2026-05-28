@@ -36,15 +36,23 @@ class Notifier:
         return datetime.utcnow() - self._seen[key] < self._cooldown
 
     def notify_if_needed(self, event: MessageEvent) -> bool:
-        """
-        Show a toast notification if event is directed at user and not a duplicate.
-        Returns True if a notification was shown.
-
-        TODO (Step 4):
-          - Check self._enabled and event.directed_at_user
-          - Compute dedup key, check _is_duplicate()
-          - Call plyer.notification.notify(title=..., message=..., app_name="horizon-monitor", timeout=8)
-          - Record key in self._seen
-          - Prune old entries from self._seen (keep last 200)
-        """
-        raise NotImplementedError
+        """Show a toast if event is directed at user and not a duplicate. Returns True if shown."""
+        if not self._enabled or not event.directed_at_user:
+            return False
+        key = self._dedup_key(event)
+        if self._is_duplicate(key):
+            return False
+        try:
+            from plyer import notification
+            notification.notify(
+                title=f"horizon-monitor — {event.speaker}",
+                message=event.message[:200],
+                app_name="horizon-monitor",
+                timeout=8,
+            )
+        except Exception:
+            pass
+        self._seen[key] = datetime.utcnow()
+        while len(self._seen) > 200:
+            self._seen.popitem(last=False)
+        return True

@@ -2,7 +2,8 @@
 Entry point for horizon-monitor.
 
 Commands:
-  python main.py monitor           # start monitoring loop
+  python main.py tray              # system tray icon (production mode)
+  python main.py monitor           # headless monitoring loop (terminal)
   python main.py monitor --dry-run # test poll loop without LLM
   python main.py query "..."       # one-shot question
   python main.py agent             # interactive REPL
@@ -88,6 +89,17 @@ async def _run_monitor(config: dict, dry_run: bool) -> None:
 
         print(f"Starting monitor (dry_run={dry_run}, interval={poll_cfg['interval_seconds']}s) — Ctrl+C to stop", flush=True)
         await poller.run(on_change=on_change, dry_run=dry_run)
+
+
+@cli.command()
+def tray():
+    """Launch system tray icon with Start/Pause/Stop controls (production mode)."""
+    config = load_config()
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        raise click.ClickException("ANTHROPIC_API_KEY not set — copy .env.example to .env and fill it in")
+    from src.tray import TrayApp
+    TrayApp(config, api_key).run()
 
 
 @cli.command()

@@ -71,20 +71,36 @@ class Poller:
             self._prev_hash = current
         return changed, str(current)
 
-    async def run(self, on_change, dry_run: bool = False) -> None:
+    async def run(
+        self,
+        on_change,
+        dry_run: bool = False,
+        stop: asyncio.Event | None = None,
+        pause: asyncio.Event | None = None,
+    ) -> None:
         """
         Poll forever. Calls `on_change(state: ScreenState, png: bytes)` when changed.
         If dry_run=True, prints changed/unchanged without calling on_change.
+        stop/pause are asyncio.Events set from outside (e.g. tray callbacks).
         """
         while True:
+            if stop and stop.is_set():
+                break
+            if pause and pause.is_set():
+                await asyncio.sleep(1.0)
+                continue
+
             try:
-                window = await self.find_horizon_window()
-                if window and self._focus:
+                # Skip list_windows when not focusing — saves one PowerShell spawn per cycle
+                if self._focus:
+                    window = await self.find_horizon_window()
                     await self._client.focus_window(str(window.pid))
+                else:
+                    window = None
 
                 png = await self._client.screenshot(screen=self._screen)
                 if not png:
-                    print("WARNING: empty screenshot bytes — check screen_index in config.toml")
+                    print("WARNING: empty screenshot bytes — check screen_index in config.toml", flush=True)
                     await asyncio.sleep(self._interval)
                     continue
 
@@ -102,6 +118,6 @@ class Poller:
                     await on_change(state, png)
 
             except Exception as exc:
-                print(f"ERROR in poll cycle: {exc}")
+                print(f"ERROR in poll cycle: {exc}", flush=True)
 
             await asyncio.sleep(self._interval)
