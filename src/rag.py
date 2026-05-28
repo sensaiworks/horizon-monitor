@@ -68,7 +68,11 @@ class RAGPipeline:
         self._client = chromadb.PersistentClient(path=self._db_path)
 
         if self._provider == "voyage" and self._voyage_key:
-            ef = _VoyageEF(api_key=self._voyage_key)
+            try:
+                ef = _VoyageEF(api_key=self._voyage_key)
+            except Exception as exc:
+                print(f"RAG: Voyage init failed ({exc}) — falling back to local embeddings", flush=True)
+                ef = _LocalEF()
         else:
             if self._provider == "voyage":
                 print("RAG: VOYAGE_API_KEY not set — falling back to local embeddings", flush=True)
