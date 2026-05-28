@@ -40,7 +40,7 @@ class Poller:
         change_threshold: int = 10,
         screen_index: int = 0,
         monitor_titles: list[str] | None = None,
-        focus_before_shot: bool = True,
+        focus_before_shot: bool = False,
     ) -> None:
         self._client = client
         self._interval = interval

@@ -6,7 +6,7 @@ command     = "node"
 interval_seconds  = 3
 change_threshold  = 10        # imagehash Hamming distance (0=identical, 64=max)
 screen_index      = 0         # 0=primary, 1=secondary — use secondary if Horizon is on monitor 2
-focus_before_shot = true      # set false if Horizon is on a secondary monitor
+focus_before_shot = false     # true only if Horizon won't render unless active (rare)
 
 [windows]
 monitor_titles = ["PVDI", "horizon-client"]  # partial window title matches (case-insensitive)
