@@ -1,0 +1,16 @@
+anthropic>=0.40.0
+mcp>=1.0.0
+chromadb>=0.5.0
+imagehash>=4.3.1
+Pillow>=10.0.0
+pydantic>=2.0.0
+tomllib>=2.0.0; python_version < "3.11"
+plyer>=2.1.0
+python-dotenv>=1.0.0
+
+# Embeddings (choose one — see config.toml embedding_provider)
+voyageai>=0.2.0          # preferred: voyage-3 via API
+sentence-transformers>=3.0.0  # offline fallback
+
+# CLI
+click>=8.1.0

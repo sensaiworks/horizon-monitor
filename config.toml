@@ -1,0 +1,31 @@
+[mcp]
+server_path = "C:\\github\\horizon-mcp\\dist\\index.js"
+command     = "node"
+
+[polling]
+interval_seconds  = 3
+change_threshold  = 10        # imagehash Hamming distance (0=identical, 64=max)
+screen_index      = 0         # 0=primary, 1=secondary — use secondary if Horizon is on monitor 2
+focus_before_shot = true      # set false if Horizon is on a secondary monitor
+
+[windows]
+monitor_titles = ["PVDI", "horizon-client"]  # partial window title matches (case-insensitive)
+
+[claude]
+vision_model = "claude-haiku-4-5-20251001"
+query_model  = "claude-sonnet-4-6"
+max_tokens   = 1024
+
+[rag]
+db_path            = "./data/chromadb"
+collection_name    = "horizon_events"
+embedding_provider = "voyage"   # "voyage" or "local"
+top_k              = 8
+
+[notifications]
+enabled          = true
+mention_keywords = []           # extra keywords that count as directed at user
+cooldown_minutes = 5            # deduplicate window
+
+[user]
+display_name = "Dmitry"         # used in prompts to detect self-mentions
