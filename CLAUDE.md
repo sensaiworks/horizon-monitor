@@ -260,11 +260,14 @@ horizon-mcp's compiled output is committed so horizon-monitor can run it without
 needing a TypeScript build step. `npm run build` only needed if horizon-mcp source changes.
 
 ### Screenshot focus strategy
-Focusing the Horizon window before screenshotting has a side effect: it steals focus
-from whatever the user is doing. Mitigations:
-- Check if the user is actively typing (detect foreground window) and skip that cycle
-- Use `screen=1` (second monitor) if Horizon runs on a secondary display — no focus needed
-- Add a config option `focus_before_screenshot = false` for secondary-monitor setups
+`focus_before_shot` defaults to `false`. The `CopyFromScreen` GDI+ call captures any
+visible window without needing it to be focused. Only set `true` if Horizon fails to
+render unless it is the active window (rare).
+
+The original `focus_before_shot = true` default caused PowerShell console windows to
+flash and steal focus every 3 s. Fixed in horizon-mcp by adding `windowsHide: true`
+and `-WindowStyle Hidden` to every `ps()` call. When `focus_before_shot = false`,
+`list_windows()` is also skipped, halving MCP tool calls per cycle.
 
 ## Extraction prompt (reference)
 
@@ -316,19 +319,21 @@ Replace `{user}` with `config.user.display_name` at runtime.
 
 ## What has been built so far
 
-- [x] Repository scaffolded (this session)
+- [x] Repository scaffolded
 - [x] CLAUDE.md written
-- [x] File stubs created
-- [x] models.py defined
-- [x] config.toml defined
-- [x] requirements.txt written
-- [ ] src/mcp_client.py — implement Step 1
-- [ ] src/poller.py — implement Step 1
-- [ ] src/extractor.py — implement Step 2
-- [ ] src/rag.py — implement Step 3
-- [ ] src/notifier.py — implement Step 4
-- [ ] src/agent.py — implement Step 5
-- [ ] main.py — wire everything together
+- [x] models.py — Pydantic data models
+- [x] config.toml / config.example.toml — settings (config.toml gitignored)
+- [x] requirements.txt
+- [x] src/mcp_client.py — Step 1: async MCP client (screenshot, list_windows, focus_window)
+- [x] src/poller.py — Step 1: poll loop + imagehash change detection + stop/pause events
+- [x] src/extractor.py — Step 2: Claude Haiku vision → list[MessageEvent]
+- [x] src/notifier.py — Step 4: Windows toast on directed_at_user with cooldown dedup
+- [x] src/tray.py — system tray icon (pystray) with Start/Pause/Resume/Stop/Quit
+- [x] main.py — tray, monitor, monitor --dry-run, query (stub), agent (stub)
+- [x] Start horizon-monitor.bat — double-click launcher / desktop shortcut
+- [x] .claude/commands/commit.md — `/commit` skill to commit+push both repos
+- [ ] src/rag.py — Step 3: ChromaDB ingest + voyage/local embeddings
+- [ ] src/agent.py — Step 5: CLI query agent with RAG retrieval
 
 ## Running the project
 
@@ -337,17 +342,18 @@ cd C:\github\horizon-monitor
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-copy .env.example .env   # then fill in ANTHROPIC_API_KEY
+copy .env.example .env   # fill in ANTHROPIC_API_KEY
 
-# Step 1 test (no LLM):
+# Production (tray icon, auto-starts monitoring):
+.venv\Scripts\pythonw main.py tray
+# or double-click: Start horizon-monitor.bat
+
+# Debug (terminal, no LLM):
 python main.py monitor --dry-run
 
-# Full monitor:
+# Debug (terminal, with Vision extraction):
 python main.py monitor
 
-# Query:
+# Query (Step 5, not yet implemented):
 python main.py query "what did John say about the deployment?"
-
-# Interactive agent:
-python main.py agent
 ```
