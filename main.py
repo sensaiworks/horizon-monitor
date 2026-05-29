@@ -91,13 +91,15 @@ async def _run_monitor(config: dict, dry_run: bool) -> None:
 
         async def on_change(state, png: bytes) -> None:
             print(f"CHANGED  {state.screenshot_hash}  [{state.window_title}]", flush=True)
-            events = await extractor.extract(png, window_title=state.window_title)
+            events, is_locked = await extractor.extract(png, window_title=state.window_title)
+            if is_locked:
+                print("  [lock screen detected]", flush=True)
             for ev in events:
                 tag = " @YOU" if ev.directed_at_user else ""
                 print(f"  [{ev.app}] {ev.speaker}: {ev.message[:80]}{tag}", flush=True)
-            if not events:
+            if not events and not is_locked:
                 print("  (no chat messages detected)", flush=True)
-            elif not dry_run:
+            elif events and not dry_run:
                 added = rag.ingest(events)
                 if added:
                     print(f"  RAG: +{added} stored", flush=True)

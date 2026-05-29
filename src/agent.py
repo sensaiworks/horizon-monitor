@@ -12,6 +12,8 @@ so the first call writes it to cache; every subsequent call reads it cheaply.
 
 from __future__ import annotations
 
+from typing import Callable
+
 import anthropic
 
 from .rag import RAGPipeline
@@ -34,8 +36,16 @@ class QueryAgent:
         self._rag = rag
         self._max_tokens = max_tokens
 
-    def query(self, question: str) -> str:
-        """Retrieve RAG context, stream an answer, return full response text."""
+    def query(
+        self,
+        question: str,
+        on_chunk: Callable[[str], None] | None = None,
+    ) -> str:
+        """
+        Retrieve RAG context, stream an answer, return full response text.
+        If on_chunk is provided, each streamed token is passed to it instead
+        of being printed to stdout (used by the tray Ask dialog).
+        """
         results = self._rag.query(question)
         context = self._rag.format_context(results)
 
@@ -58,9 +68,13 @@ class QueryAgent:
             messages=[{"role": "user", "content": user_content}],
         ) as stream:
             for text in stream.text_stream:
-                print(text, end="", flush=True)
+                if on_chunk:
+                    on_chunk(text)
+                else:
+                    print(text, end="", flush=True)
                 full_text += text
-        print()
+        if not on_chunk:
+            print()
         return full_text
 
     def repl(self) -> None:

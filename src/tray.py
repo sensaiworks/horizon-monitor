@@ -1,18 +1,24 @@
 """
 Windows system tray icon for horizon-monitor.
 
-Auto-starts monitoring on launch. Right-click menu provides:
-  Pause / Resume / Stop / Start   — monitor lifecycle
-  Last event line                 — most recent extracted message
-  Quit                            — stop monitor and exit
+Right-click menu:
+  ● status / last event / event count
+  Recent messages ▶  (last 5)
+  Ask...             (query dialog, also triggered by double-click)
+  ─────
+  Pause / Resume / Stop / Start
+  Unlock Remote Desktop   (when remote is locked)
+  ─────
+  Quit
 
-The async monitor loop runs in a background thread; the tray runs in
-the main thread (required by pystray on Windows).
+Lock screen: extractor sets the "locked" flag → red icon → Unlock item appears.
+Unlock sequence: focus Horizon → Ctrl+Alt+Insert → wait → type HORIZON_PASSWORD → Enter.
 """
 
 from __future__ import annotations
 
 import asyncio
+import collections
 import os
 import queue
 import threading
@@ -20,6 +26,7 @@ import threading
 from PIL import Image, ImageDraw
 import pystray
 
+from .agent import QueryAgent
 from .extractor import Extractor
 from .mcp_client import HorizonMCPClient
 from .models import MessageEvent
@@ -31,6 +38,7 @@ _STATUS_COLORS = {
     "monitoring": (34, 197, 94),
     "paused":     (251, 146, 60),
     "stopped":    (107, 114, 128),
+    "locked":     (220, 38,  38),
 }
 
 
@@ -41,7 +49,6 @@ def _make_icon(status: str) -> Image.Image:
     color = _STATUS_COLORS.get(status, _STATUS_COLORS["stopped"])
     d.ellipse([2, 2, size - 2, size - 2], fill=(20, 20, 30, 255))
     d.ellipse([8, 8, size - 8, size - 8], fill=(*color, 255))
-    # "H" letterform
     d.rectangle([18, 20, 24, 44], fill=(255, 255, 255, 220))
     d.rectangle([40, 20, 46, 44], fill=(255, 255, 255, 220))
     d.rectangle([18, 30, 46, 36], fill=(255, 255, 255, 220))
@@ -53,8 +60,11 @@ class TrayApp:
         self._config = config
         self._api_key = api_key
         self._status = "stopped"
+        self._remote_locked = False
         self._last_event: MessageEvent | None = None
+        self._recent: collections.deque[MessageEvent] = collections.deque(maxlen=5)
         self._event_queue: queue.Queue[MessageEvent] = queue.Queue()
+        self._db_count: int = 0
 
         self._monitor_thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -69,17 +79,38 @@ class TrayApp:
             "monitoring": "● Monitoring",
             "paused":     "⏸ Paused",
             "stopped":    "○ Stopped",
-        }[self._status]
+            "locked":     "🔒 Remote Locked",
+        }.get(self._status, self._status)
 
         if self._last_event:
-            snippet = self._last_event.message[:45].replace("\n", " ")
+            snippet = self._last_event.message[:42].replace("\n", " ")
             last_label = f"{self._last_event.speaker}: {snippet}"
         else:
             last_label = "No events yet"
 
+        db_label = f"Database: {self._db_count} event{'s' if self._db_count != 1 else ''}"
+
+        # Recent messages submenu
+        if self._recent:
+            recent_items = []
+            for ev in reversed(self._recent):
+                ts = ev.timestamp.strftime("%H:%M")
+                line = f"{ts}  {ev.speaker}: {ev.message[:35].replace(chr(10), ' ')}"
+                recent_items.append(pystray.MenuItem(line, None, enabled=False))
+            recent_menu = pystray.MenuItem(
+                "Recent messages",
+                pystray.Menu(*recent_items),
+            )
+        else:
+            recent_menu = pystray.MenuItem("Recent messages", None, enabled=False)
+
         items = [
             pystray.MenuItem(status_label, None, enabled=False),
             pystray.MenuItem(last_label, None, enabled=False),
+            pystray.MenuItem(db_label, None, enabled=False),
+            pystray.Menu.SEPARATOR,
+            recent_menu,
+            pystray.MenuItem("Ask...", self._on_ask, default=True),
             pystray.Menu.SEPARATOR,
         ]
 
@@ -93,8 +124,13 @@ class TrayApp:
                 pystray.MenuItem("Resume", self._on_resume),
                 pystray.MenuItem("Stop", self._on_stop),
             ]
+        elif self._status == "locked":
+            items.append(pystray.MenuItem("Resume after unlock", self._on_start))
         else:
             items.append(pystray.MenuItem("Start", self._on_start))
+
+        if self._remote_locked:
+            items.append(pystray.MenuItem("Unlock Remote Desktop", self._on_unlock))
 
         items += [
             pystray.Menu.SEPARATOR,
@@ -105,13 +141,15 @@ class TrayApp:
     def _refresh(self) -> None:
         if not self._icon:
             return
-        self._icon.icon = _make_icon(self._status)
+        icon_status = "locked" if self._remote_locked else self._status
+        self._icon.icon = _make_icon(icon_status)
         self._icon.title = f"horizon-monitor — {self._status}"
         self._icon.menu = pystray.Menu(self._menu_items)
 
     # -------------------------------------------------------- tray callbacks
 
     def _on_start(self, icon, item) -> None:
+        self._remote_locked = False
         self._start_monitor()
 
     def _on_stop(self, icon, item) -> None:
@@ -132,6 +170,12 @@ class TrayApp:
     def _on_quit(self, icon, item) -> None:
         self._stop_monitor()
         icon.stop()
+
+    def _on_ask(self, icon=None, item=None) -> None:
+        threading.Thread(target=self._query_dialog_thread, daemon=True).start()
+
+    def _on_unlock(self, icon, item) -> None:
+        threading.Thread(target=self._unlock_worker, daemon=True).start()
 
     # --------------------------------------------------- monitor lifecycle
 
@@ -175,15 +219,15 @@ class TrayApp:
             cooldown_minutes=cfg["notifications"]["cooldown_minutes"],
         )
         rag_cfg = cfg["rag"]
-        voyage_key = os.environ.get("VOYAGE_API_KEY") or None
         rag = RAGPipeline(
             db_path=rag_cfg["db_path"],
             collection_name=rag_cfg["collection_name"],
             embedding_provider=rag_cfg["embedding_provider"],
-            voyage_api_key=voyage_key,
+            voyage_api_key=os.environ.get("VOYAGE_API_KEY") or None,
             top_k=rag_cfg["top_k"],
         )
         rag.connect()
+        self._db_count = rag._collection.count()
 
         poll = cfg["polling"]
         win = cfg["windows"]
@@ -199,27 +243,139 @@ class TrayApp:
             )
 
             async def on_change(state, png: bytes) -> None:
-                events = await extractor.extract(png, window_title=state.window_title)
+                events, is_locked = await extractor.extract(png, window_title=state.window_title)
+
+                if is_locked != self._remote_locked:
+                    self._remote_locked = is_locked
+                    if is_locked:
+                        print("Remote desktop is locked", flush=True)
+                    self._refresh()
+
                 for ev in events:
                     self._event_queue.put(ev)
                     notifier.notify_if_needed(ev)
                 if events:
                     added = rag.ingest(events)
                     if added:
-                        print(f"RAG: ingested {added} new event(s)", flush=True)
+                        self._db_count = rag._collection.count()
+                        print(f"RAG: +{added} stored ({self._db_count} total)", flush=True)
 
             await poller.run(on_change=on_change, stop=self._stop_ev, pause=self._pause_ev)
 
     def _drain_events(self) -> None:
-        """Update tray with latest event; exits when monitor stops."""
         while True:
             try:
                 ev = self._event_queue.get(timeout=1.0)
                 self._last_event = ev
+                self._recent.append(ev)
                 self._refresh()
             except queue.Empty:
                 if self._status == "stopped":
                     break
+
+    # --------------------------------------------------------- Ask dialog
+
+    def _make_rag(self) -> RAGPipeline:
+        cfg = self._config["rag"]
+        rag = RAGPipeline(
+            db_path=cfg["db_path"],
+            collection_name=cfg["collection_name"],
+            embedding_provider=cfg["embedding_provider"],
+            voyage_api_key=os.environ.get("VOYAGE_API_KEY") or None,
+            top_k=cfg["top_k"],
+        )
+        rag.connect()
+        return rag
+
+    def _query_dialog_thread(self) -> None:
+        import tkinter as tk
+        from tkinter import scrolledtext
+
+        root = tk.Tk()
+        root.title("Ask horizon-monitor")
+        root.geometry("540x400")
+        root.resizable(True, True)
+
+        frame = tk.Frame(root)
+        frame.pack(fill=tk.X, padx=10, pady=(10, 4))
+
+        entry = tk.Entry(frame, font=("Segoe UI", 11))
+        entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=4)
+
+        btn = tk.Button(frame, text="Ask", width=6)
+        btn.pack(side=tk.LEFT, padx=(6, 0))
+
+        entry.focus()
+
+        txt = scrolledtext.ScrolledText(
+            root, font=("Segoe UI", 10), wrap=tk.WORD, state=tk.DISABLED
+        )
+        txt.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
+        def _append(text: str) -> None:
+            txt.config(state=tk.NORMAL)
+            txt.insert(tk.END, text)
+            txt.see(tk.END)
+            txt.config(state=tk.DISABLED)
+
+        def ask() -> None:
+            q = entry.get().strip()
+            if not q:
+                return
+            entry.delete(0, tk.END)
+            txt.config(state=tk.NORMAL)
+            txt.delete(1.0, tk.END)
+            txt.config(state=tk.DISABLED)
+            _append(f"Q: {q}\n\nA: ")
+            btn.config(state=tk.DISABLED)
+
+            def run() -> None:
+                try:
+                    rag = self._make_rag()
+                    agent = QueryAgent(
+                        api_key=self._api_key,
+                        model=self._config["claude"]["query_model"],
+                        rag=rag,
+                        max_tokens=self._config["claude"]["max_tokens"],
+                    )
+                    agent.query(q, on_chunk=lambda t: root.after(0, lambda t=t: _append(t)))
+                    root.after(0, lambda: _append("\n"))
+                except Exception as exc:
+                    root.after(0, lambda: _append(f"\n[Error: {exc}]"))
+                finally:
+                    root.after(0, lambda: btn.config(state=tk.NORMAL))
+
+            threading.Thread(target=run, daemon=True).start()
+
+        btn.config(command=ask)
+        entry.bind("<Return>", lambda e: ask())
+        root.mainloop()
+
+    # --------------------------------------------------------- Unlock
+
+    def _unlock_worker(self) -> None:
+        asyncio.run(self._unlock_async())
+
+    async def _unlock_async(self) -> None:
+        password = os.environ.get("HORIZON_PASSWORD", "")
+        if not password:
+            print("HORIZON_PASSWORD not set in .env — cannot unlock", flush=True)
+            return
+
+        cfg = self._config
+        print("Unlocking remote desktop…", flush=True)
+        try:
+            async with HorizonMCPClient(cfg["mcp"]["server_path"], cfg["mcp"]["command"]) as client:
+                await client.focus_window("PVDI")
+                await asyncio.sleep(0.5)
+                await client.press_key("Ctrl+Alt+Insert")   # Horizon's Ctrl+Alt+Del
+                await asyncio.sleep(2.5)                    # wait for login prompt
+                await client.type_text(password)
+                await asyncio.sleep(0.3)
+                await client.press_key("Enter")
+            print("Unlock sequence sent", flush=True)
+        except Exception as exc:
+            print(f"Unlock failed: {exc}", flush=True)
 
     # -------------------------------------------------------------- entry
 

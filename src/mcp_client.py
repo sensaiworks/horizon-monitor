@@ -75,3 +75,13 @@ class HorizonMCPClient:
         """Bring window to foreground. Returns status string from server."""
         result = await self._call("focus_window", target=target)
         return result.content[0].text
+
+    async def press_key(self, key: str) -> str:
+        """Send a key or key combination to the focused window."""
+        result = await self._call("press_key", key=key)
+        return result.content[0].text
+
+    async def type_text(self, text: str) -> str:
+        """Type a string into the focused window."""
+        result = await self._call("type_text", text=text)
+        return result.content[0].text
