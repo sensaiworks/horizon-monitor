@@ -18,6 +18,7 @@ max_tokens   = 1024
 
 [rag]
 db_path            = "./data/chromadb"
+events_db          = "./data/events.db"   # SQLite structured store (exact/temporal queries)
 collection_name    = "horizon_events"
 embedding_provider = "voyage"   # "voyage" or "local"
 top_k              = 8

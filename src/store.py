@@ -1,0 +1,137 @@
+"""
+Structured event store (SQLite) — the durable, queryable source of truth.
+
+ChromaDB (src/rag.py) handles *semantic* search ("anything about deployments").
+This store handles *exact* and *temporal* questions that vector search is bad at —
+"everything John said between 9 and 11am", "the last 20 events", counts per
+speaker/channel. Both stores are keyed on the same MessageEvent.doc_id(), so a row
+here and a vector there refer to the same message.
+
+It is also the dedup gate: ingest() uses INSERT OR IGNORE on the doc_id primary key
+and returns only the rows that were genuinely new, so callers embed/notify each
+message exactly once even though the poller re-reads the same screen repeatedly.
+
+SQLite is opened with check_same_thread=False because the tray drains events on a
+different thread than the monitor loop; writes are serialised through one connection.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+
+from .models import MessageEvent
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS events (
+    doc_id           TEXT PRIMARY KEY,
+    observed_at      TEXT NOT NULL,   -- ISO-8601 capture time (UTC)
+    chat_time        TEXT,            -- on-screen timestamp, verbatim
+    speaker          TEXT,
+    message          TEXT,
+    app              TEXT,
+    channel          TEXT,
+    window_title     TEXT,
+    directed_at_user INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_events_observed_at ON events(observed_at);
+CREATE INDEX IF NOT EXISTS idx_events_speaker     ON events(speaker);
+CREATE INDEX IF NOT EXISTS idx_events_channel     ON events(channel);
+"""
+
+
+class EventStore:
+    def __init__(self, db_path: str) -> None:
+        self._db_path = db_path
+        self._conn: sqlite3.Connection | None = None
+
+    def connect(self) -> None:
+        Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._conn.executescript(_SCHEMA)
+        self._conn.commit()
+
+    def ingest(self, events: list[MessageEvent]) -> list[MessageEvent]:
+        """Insert events, skipping any already stored (by doc_id).
+
+        Returns the subset that were genuinely new — callers should embed and
+        notify only on these.
+        """
+        assert self._conn is not None, "call connect() first"
+        new: list[MessageEvent] = []
+        for e in events:
+            cur = self._conn.execute(
+                """INSERT OR IGNORE INTO events
+                   (doc_id, observed_at, chat_time, speaker, message, app,
+                    channel, window_title, directed_at_user)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    e.doc_id(),
+                    e.timestamp.isoformat(),
+                    e.chat_time,
+                    e.speaker,
+                    e.message,
+                    e.app,
+                    e.channel,
+                    e.window_title,
+                    int(e.directed_at_user),
+                ),
+            )
+            if cur.rowcount:
+                new.append(e)
+        self._conn.commit()
+        return new
+
+    def count(self) -> int:
+        if self._conn is None:
+            return 0
+        return self._conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+
+    def recent(self, limit: int = 20) -> list[dict]:
+        """Most recently captured events, newest first."""
+        assert self._conn is not None, "call connect() first"
+        rows = self._conn.execute(
+            "SELECT * FROM events ORDER BY observed_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def query_range(
+        self,
+        start_iso: str,
+        end_iso: str,
+        speaker: str | None = None,
+        channel: str | None = None,
+    ) -> list[dict]:
+        """Events captured within [start_iso, end_iso), optionally filtered by
+        speaker/channel (case-insensitive substring), oldest first."""
+        assert self._conn is not None, "call connect() first"
+        sql = "SELECT * FROM events WHERE observed_at >= ? AND observed_at < ?"
+        params: list = [start_iso, end_iso]
+        if speaker:
+            sql += " AND lower(speaker) LIKE ?"
+            params.append(f"%{speaker.lower()}%")
+        if channel:
+            sql += " AND lower(channel) LIKE ?"
+            params.append(f"%{channel.lower()}%")
+        sql += " ORDER BY observed_at ASC"
+        return [dict(r) for r in self._conn.execute(sql, params).fetchall()]
+
+    def speakers(self) -> list[str]:
+        assert self._conn is not None, "call connect() first"
+        rows = self._conn.execute(
+            "SELECT DISTINCT speaker FROM events WHERE speaker <> '' ORDER BY speaker"
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def channels(self) -> list[str]:
+        assert self._conn is not None, "call connect() first"
+        rows = self._conn.execute(
+            "SELECT DISTINCT channel FROM events WHERE channel <> '' ORDER BY channel"
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def close(self) -> None:
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None

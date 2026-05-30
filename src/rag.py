@@ -116,6 +116,8 @@ class RAGPipeline:
                     "speaker": e.speaker,
                     "app": e.app,
                     "timestamp": e.timestamp.isoformat(),
+                    "chat_time": e.chat_time,
+                    "channel": e.channel,
                     "directed_at_user": e.directed_at_user,
                     "window_title": e.window_title,
                 }
@@ -152,15 +154,24 @@ class RAGPipeline:
                 "speaker": meta["speaker"],
                 "app": meta["app"],
                 "timestamp": meta["timestamp"],
+                "chat_time": meta.get("chat_time", ""),
+                "channel": meta.get("channel", ""),
                 "directed_at_user": meta["directed_at_user"],
                 "distance": dist,
             })
         return output
 
     def format_context(self, results: list[dict]) -> str:
-        """Format RAG results as context string for the query agent prompt."""
+        """Format RAG results as context string for the query agent prompt.
+
+        Prefer the message's on-screen time over our capture time so the model can
+        answer "this morning"/"yesterday" questions, and name the channel it came
+        from when known.
+        """
         lines = []
         for r in results:
-            ts = r.get("timestamp", "")[:16]
-            lines.append(f"[{ts}] {r['speaker']} ({r['app']}): {r['document']}")
+            when = r.get("chat_time") or r.get("timestamp", "")[:16]
+            channel = r.get("channel") or ""
+            where = f" in {channel}" if channel else ""
+            lines.append(f"[{when}]{where} {r['speaker']} ({r['app']}): {r['document']}")
         return "\n".join(lines)

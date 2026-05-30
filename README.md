@@ -86,7 +86,8 @@ The interesting parts of this project are the constraints, not the line count:
 | Query agent       | Claude Sonnet (streaming, prompt-cached system)     |
 | Screen capture    | `horizon-mcp` MCP server (stdio) + MCP Python SDK   |
 | Change detection  | `imagehash` perceptual hashing                      |
-| Vector store      | ChromaDB (persistent, local)                        |
+| Vector store      | ChromaDB (semantic search, persistent, local)       |
+| Structured store  | SQLite (timestamps, channels, exact/temporal queries) |
 | Embeddings        | `voyage-3` (API) or `all-MiniLM-L6-v2` (offline)    |
 | Data models       | Pydantic v2                                         |
 | UI                | `pystray` tray icon + Tk "Ask…" dialog              |
@@ -143,10 +144,17 @@ window titles, model IDs, embedding provider, and notification cooldown. API key
 optional remote-desktop password live in `.env`. See `config.example.toml` and
 `.env.example` for the full set of options.
 
+**Storage.** Each extracted message is written to two local stores under `./data/`
+(gitignored), keyed on the same content hash so they stay in sync:
+
+- **ChromaDB** (`./data/chromadb`) — embeddings for semantic search.
+- **SQLite** (`./data/events.db`) — the structured source of truth, retaining the
+  message's on-screen time and channel for exact and time-ranged queries; it also acts
+  as the dedup gate so each message is embedded and notified exactly once.
+
 **Embeddings.** The RAG pipeline uses `voyage-3` when `embedding_provider = "voyage"` and
 `VOYAGE_API_KEY` is set; otherwise it falls back automatically to the offline
-`all-MiniLM-L6-v2` sentence-transformers model (~100 MB on first download). ChromaDB
-persists to `./data/chromadb` (gitignored).
+`all-MiniLM-L6-v2` sentence-transformers model (~100 MB on first download).
 
 ## Privacy & safety
 

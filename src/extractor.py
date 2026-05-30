@@ -32,6 +32,8 @@ Return a JSON object ONLY, no explanation, no markdown:
       "speaker": "Full Name or username",
       "message": "exact message text",
       "app": "teams" | "symphony" | "unknown",
+      "channel": "conversation / channel / room / thread name shown in the UI",
+      "time": "the message's on-screen timestamp exactly as shown",
       "directed_at_user": true | false
     }}
   ]
@@ -43,6 +45,14 @@ lock_screen is true if the screen shows a Windows lock screen (clock visible,
 If lock_screen is true, messages must be [].
 
 messages contains all visible chat messages from Microsoft Teams or Symphony.
+
+channel is the name of the open conversation, channel, room, or thread (e.g.
+"Deployments", "John Smith", "Trading Desk") — read it from the header or the
+selected item in the sidebar. Use "" if you cannot tell.
+
+time is the timestamp shown next to or above the message, copied verbatim (e.g.
+"10:32 AM", "Yesterday 14:05", "Mon 09:14"). Use "" if no time is visible for it.
+
 directed_at_user is true if the message @mentions "{user}", uses their first name
 "{user}" directly, or is a direct/private message thread to them.
 
@@ -97,6 +107,8 @@ class Extractor:
                         speaker=item.get("speaker", "unknown"),
                         message=item.get("message", ""),
                         app=item.get("app", "unknown"),
+                        channel=(item.get("channel") or "").strip(),
+                        chat_time=(item.get("time") or "").strip(),
                         directed_at_user=bool(item.get("directed_at_user", False)),
                         window_title=window_title,
                     )

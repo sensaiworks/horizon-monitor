@@ -69,6 +69,7 @@ async def _run_monitor(config: dict, dry_run: bool) -> None:
     from src.poller import Poller
     from src.extractor import Extractor
     from src.rag import RAGPipeline
+    from src.store import EventStore
 
     mcp_cfg = config["mcp"]
     poll_cfg = config["polling"]
@@ -94,6 +95,9 @@ async def _run_monitor(config: dict, dry_run: bool) -> None:
     )
     rag.connect()
 
+    store = EventStore(rag_cfg.get("events_db", "./data/events.db"))
+    store.connect()
+
     async with HorizonMCPClient(
         server_path=mcp_cfg["server_path"],
         command=mcp_cfg["command"],
@@ -114,13 +118,16 @@ async def _run_monitor(config: dict, dry_run: bool) -> None:
                 print("  [lock screen detected]", flush=True)
             for ev in events:
                 tag = " @YOU" if ev.directed_at_user else ""
-                print(f"  [{ev.app}] {ev.speaker}: {ev.message[:80]}{tag}", flush=True)
+                ch = f" «{ev.channel}»" if ev.channel else ""
+                t = f" {ev.chat_time}" if ev.chat_time else ""
+                print(f"  [{ev.app}{ch}]{t} {ev.speaker}: {ev.message[:80]}{tag}", flush=True)
             if not events and not is_locked:
                 print("  (no chat messages detected)", flush=True)
-            elif events and not dry_run:
-                added = rag.ingest(events)
-                if added:
-                    print(f"  RAG: +{added} stored", flush=True)
+            elif events:
+                new = store.ingest(events)   # dedup gate — only genuinely new messages
+                if new:
+                    rag.ingest(new)          # embed only the new ones
+                    print(f"  stored +{len(new)} ({store.count()} total)", flush=True)
 
         print(f"Starting monitor (dry_run={dry_run}, interval={poll_cfg['interval_seconds']}s) — Ctrl+C to stop", flush=True)
         await poller.run(on_change=on_change, dry_run=dry_run)

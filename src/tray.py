@@ -33,6 +33,7 @@ from .models import MessageEvent
 from .notifier import Notifier
 from .poller import Poller
 from .rag import RAGPipeline
+from .store import EventStore
 
 _STATUS_COLORS = {
     "monitoring": (34, 197, 94),
@@ -94,7 +95,7 @@ class TrayApp:
         if self._recent:
             recent_items = []
             for ev in reversed(self._recent):
-                ts = ev.timestamp.strftime("%H:%M")
+                ts = ev.chat_time or ev.timestamp.strftime("%H:%M")
                 line = f"{ts}  {ev.speaker}: {ev.message[:35].replace(chr(10), ' ')}"
                 recent_items.append(pystray.MenuItem(line, None, enabled=False))
             recent_menu = pystray.MenuItem(
@@ -227,7 +228,9 @@ class TrayApp:
             top_k=rag_cfg["top_k"],
         )
         rag.connect()
-        self._db_count = rag.count()
+        store = EventStore(rag_cfg.get("events_db", "./data/events.db"))
+        store.connect()
+        self._db_count = store.count()
 
         poll = cfg["polling"]
         win = cfg["windows"]
@@ -251,14 +254,17 @@ class TrayApp:
                         print("Remote desktop is locked", flush=True)
                     self._refresh()
 
-                for ev in events:
-                    self._event_queue.put(ev)
-                    notifier.notify_if_needed(ev)
                 if events:
-                    added = rag.ingest(events)
-                    if added:
-                        self._db_count = rag.count()
-                        print(f"RAG: +{added} stored ({self._db_count} total)", flush=True)
+                    new = store.ingest(events)   # dedup gate
+                    if new:
+                        rag.ingest(new)           # embed only the new ones
+                        self._db_count = store.count()
+                        print(f"stored +{len(new)} ({self._db_count} total)", flush=True)
+                        # Notify and surface only genuinely new messages — not the
+                        # same screen re-read every poll cycle.
+                        for ev in new:
+                            self._event_queue.put(ev)
+                            notifier.notify_if_needed(ev)
 
             await poller.run(on_change=on_change, stop=self._stop_ev, pause=self._pause_ev)
 
