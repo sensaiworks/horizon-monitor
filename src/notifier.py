@@ -6,15 +6,13 @@ Deduplicates using a short-term cache keyed on (speaker, message_prefix)
 with a configurable cooldown window.
 
 Uses plyer.notification.notify() — works on Windows, macOS, Linux.
-
-TODO (Step 4): implement `notify_if_needed()`.
 """
 
 from __future__ import annotations
 
 import hashlib
 from collections import OrderedDict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from .models import MessageEvent
 
@@ -28,12 +26,12 @@ class Notifier:
 
     def _dedup_key(self, event: MessageEvent) -> str:
         raw = f"{event.speaker}:{event.message[:60]}"
-        return hashlib.md5(raw.encode()).hexdigest()
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def _is_duplicate(self, key: str) -> bool:
         if key not in self._seen:
             return False
-        return datetime.utcnow() - self._seen[key] < self._cooldown
+        return datetime.now(timezone.utc) - self._seen[key] < self._cooldown
 
     def notify_if_needed(self, event: MessageEvent) -> bool:
         """Show a toast if event is directed at user and not a duplicate. Returns True if shown."""
@@ -42,6 +40,7 @@ class Notifier:
         key = self._dedup_key(event)
         if self._is_duplicate(key):
             return False
+        shown = True
         try:
             from plyer import notification
             notification.notify(
@@ -50,9 +49,10 @@ class Notifier:
                 app_name="horizon-monitor",
                 timeout=8,
             )
-        except Exception:
-            pass
-        self._seen[key] = datetime.utcnow()
+        except Exception as exc:
+            print(f"Notifier: toast failed ({exc})", flush=True)
+            shown = False
+        self._seen[key] = datetime.now(timezone.utc)
         while len(self._seen) > 200:
             self._seen.popitem(last=False)
-        return True
+        return shown

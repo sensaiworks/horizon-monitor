@@ -13,7 +13,7 @@ from __future__ import annotations
 import base64
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 
 import anthropic
 
@@ -87,7 +87,7 @@ class Extractor:
 
         raw = response.content[0].text
         items, is_lock_screen = self._parse_response(raw)
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         events = []
         for item in items:
             try:

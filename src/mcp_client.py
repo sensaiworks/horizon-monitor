@@ -11,8 +11,6 @@ Usage:
         await client.focus_window("PVDI")
 
 See CLAUDE.md §"How horizon-mcp works" for the full tool reference.
-
-TODO (Step 1): implement all methods below.
 """
 
 from __future__ import annotations

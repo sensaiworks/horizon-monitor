@@ -380,12 +380,11 @@ class TrayApp:
     # -------------------------------------------------------------- entry
 
     def run(self) -> None:
-        """Start monitoring and show tray icon. Blocks until Quit."""
-        self._start_monitor()
+        """Show tray icon in stopped state. User must click Start to begin monitoring."""
         self._icon = pystray.Icon(
             name="horizon-monitor",
-            icon=_make_icon("monitoring"),
-            title="horizon-monitor — monitoring",
+            icon=_make_icon("stopped"),
+            title="horizon-monitor — stopped",
             menu=pystray.Menu(self._menu_items),
         )
         self._icon.run()
