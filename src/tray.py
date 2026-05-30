@@ -227,7 +227,7 @@ class TrayApp:
             top_k=rag_cfg["top_k"],
         )
         rag.connect()
-        self._db_count = rag._collection.count()
+        self._db_count = rag.count()
 
         poll = cfg["polling"]
         win = cfg["windows"]
@@ -257,7 +257,7 @@ class TrayApp:
                 if events:
                     added = rag.ingest(events)
                     if added:
-                        self._db_count = rag._collection.count()
+                        self._db_count = rag.count()
                         print(f"RAG: +{added} stored ({self._db_count} total)", flush=True)
 
             await poller.run(on_change=on_change, stop=self._stop_ev, pause=self._pause_ev)

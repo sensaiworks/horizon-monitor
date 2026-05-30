@@ -228,7 +228,13 @@ display_name = "Dmitry"   # used in prompts to detect self-mentions
 ```
 ANTHROPIC_API_KEY=sk-ant-...
 VOYAGE_API_KEY=pa-...        # optional, only if embedding_provider = "voyage"
+HORIZON_PASSWORD=...         # optional, only for the tray "Unlock Remote Desktop" action
 ```
+
+`HORIZON_PASSWORD` is the remote desktop login password. It is read only by the tray
+unlock worker (`src/tray.py`), typed into the Horizon session via `type_text`, and never
+logged or sent to any API. Leave it blank to disable the auto-unlock feature. `.env` is
+gitignored — never commit it.
 
 ## Key design decisions and WHY
 
@@ -331,9 +337,11 @@ Replace `{user}` with `config.user.display_name` at runtime.
 - [x] src/tray.py — system tray icon (pystray) with Start/Pause/Resume/Stop/Quit
 - [x] main.py — tray, monitor, monitor --dry-run, query (stub), agent (stub)
 - [x] Start horizon-monitor.bat — double-click launcher / desktop shortcut
-- [x] .claude/commands/commit.md — `/commit` skill to commit+push both repos
-- [ ] src/rag.py — Step 3: ChromaDB ingest + voyage/local embeddings
-- [ ] src/agent.py — Step 5: CLI query agent with RAG retrieval
+- [x] .claude/commands/commit-monitor.md — `/commit-monitor` skill to commit+push this repo only
+- [x] src/rag.py — Step 3: ChromaDB ingest + voyage/local embeddings (auto-fallback to local)
+- [x] src/agent.py — Step 5: CLI query agent + interactive REPL with RAG retrieval & streaming
+- [x] README.md — quick-start and command reference
+- [ ] Step 6: give the interactive agent direct horizon-mcp tool access (screenshot/focus)
 
 ## Running the project
 
@@ -344,7 +352,7 @@ python -m venv .venv
 pip install -r requirements.txt
 copy .env.example .env   # fill in ANTHROPIC_API_KEY
 
-# Production (tray icon, auto-starts monitoring):
+# Production (tray icon; launches stopped — click "Start" to begin monitoring):
 .venv\Scripts\pythonw main.py tray
 # or double-click: Start horizon-monitor.bat
 

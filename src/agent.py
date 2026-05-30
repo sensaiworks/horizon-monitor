@@ -79,7 +79,7 @@ class QueryAgent:
 
     def repl(self) -> None:
         """Interactive REPL loop. Type 'exit' or Ctrl+C to quit."""
-        count = self._rag._collection.count() if self._rag._collection else 0
+        count = self._rag.count()
         print(f"horizon-monitor agent — {count} events in database. Type 'exit' to quit.\n")
         while True:
             try:

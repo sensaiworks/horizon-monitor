@@ -15,15 +15,12 @@ Always pass screen=0 or screen=1 explicitly. See CLAUDE.md §"Known issues".
 
 GOTCHA: focus_window steals focus from the user. If focus_before_shot is False and
 Horizon is on a secondary monitor, screenshots still work without stealing focus.
-
-TODO (Step 1): implement `run()` and `_detect_change()`.
 """
 
 from __future__ import annotations
 
 import asyncio
 import io
-from datetime import datetime
 
 import imagehash
 from PIL import Image

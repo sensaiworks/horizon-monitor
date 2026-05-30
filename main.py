@@ -15,13 +15,16 @@ API keys are loaded from .env (copy from .env.example).
 from __future__ import annotations
 
 import asyncio
-import sys
-import tomllib
+import os
 from pathlib import Path
+
+try:
+    import tomllib  # Python 3.11+
+except ModuleNotFoundError:  # pragma: no cover - older interpreters
+    import tomli as tomllib
 
 import click
 from dotenv import load_dotenv
-import os
 
 load_dotenv()
 
@@ -29,8 +32,21 @@ CONFIG_PATH = Path(__file__).parent / "config.toml"
 
 
 def load_config() -> dict:
+    if not CONFIG_PATH.exists():
+        raise click.ClickException(
+            f"{CONFIG_PATH.name} not found — copy config.example.toml to config.toml and edit it"
+        )
     with open(CONFIG_PATH, "rb") as f:
         return tomllib.load(f)
+
+
+def require_api_key() -> str:
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        raise click.ClickException(
+            "ANTHROPIC_API_KEY not set — copy .env.example to .env and fill it in"
+        )
+    return api_key
 
 
 @click.group()
@@ -43,6 +59,8 @@ def cli():
 def monitor(dry_run: bool):
     """Start the monitoring loop."""
     config = load_config()
+    if not dry_run:
+        require_api_key()  # dry-run never calls the LLM, so the key is optional there
     asyncio.run(_run_monitor(config, dry_run))
 
 
@@ -112,9 +130,7 @@ async def _run_monitor(config: dict, dry_run: bool) -> None:
 def tray():
     """Launch system tray icon with Start/Pause/Stop controls (production mode)."""
     config = load_config()
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        raise click.ClickException("ANTHROPIC_API_KEY not set — copy .env.example to .env and fill it in")
+    api_key = require_api_key()
     from src.tray import TrayApp
     TrayApp(config, api_key).run()
 
@@ -124,7 +140,7 @@ def tray():
 def query(question: str):
     """Ask a question about recorded conversations."""
     config = load_config()
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    api_key = require_api_key()
     _run_query(config, api_key, question)
 
 
@@ -132,7 +148,7 @@ def query(question: str):
 def agent():
     """Start interactive query REPL."""
     config = load_config()
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    api_key = require_api_key()
     _run_query(config, api_key, question=None)
 
 

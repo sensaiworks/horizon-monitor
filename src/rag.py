@@ -84,6 +84,12 @@ class RAGPipeline:
             metadata={"hnsw:space": "cosine"},
         )
 
+    def count(self) -> int:
+        """Number of documents currently stored in the collection."""
+        if self._collection is None:
+            return 0
+        return self._collection.count()
+
     def ingest(self, events: list[MessageEvent]) -> int:
         """Add events to ChromaDB. Returns number of new documents added."""
         assert self._collection is not None, "call connect() first"
