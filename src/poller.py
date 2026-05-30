@@ -11,7 +11,7 @@ Runs every `config.polling.interval_seconds`. On each tick:
   7. If changed: pass PNG bytes to Extractor
 
 GOTCHA: Combined screenshot (no screen arg) returns empty bytes on some configs.
-Always pass screen=0 or screen=1 explicitly. See CLAUDE.md §"Known issues".
+Always pass screen=0 or screen=1 explicitly.
 
 GOTCHA: focus_window steals focus from the user. If focus_before_shot is False and
 Horizon is on a secondary monitor, screenshots still work without stealing focus.

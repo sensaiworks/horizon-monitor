@@ -10,7 +10,9 @@ Usage:
         windows = await client.list_windows()
         await client.focus_window("PVDI")
 
-See CLAUDE.md §"How horizon-mcp works" for the full tool reference.
+See the horizon-mcp project for the full tool reference. This client uses it
+read-only: screenshot, list_windows, focus_window (plus press_key / type_text
+for the optional remote-unlock action).
 """
 
 from __future__ import annotations

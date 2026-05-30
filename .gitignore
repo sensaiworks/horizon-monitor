@@ -7,7 +7,10 @@ __pycache__/
 *.local
 config.toml
 data/
-.claude/settings.local.json
+
+# AI-assistant scaffolding — kept local, not published to the public repo
+CLAUDE.md
+.claude/
 *.egg-info/
 dist/
 build/
