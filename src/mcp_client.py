@@ -10,9 +10,10 @@ Usage:
         windows = await client.list_windows()
         await client.focus_window("PVDI")
 
-See the horizon-mcp project for the full tool reference. This client uses it
-read-only: screenshot, list_windows, focus_window (plus press_key / type_text
-for the optional remote-unlock action).
+See the horizon-mcp project for the full tool reference. Monitoring uses the
+read paths (screenshot, list_windows, focus_window); the control paths (click,
+key_combo, paste_text, scroll, …) drive the remote session and are only invoked
+through RemoteController behind the opt-in [control] config flag.
 """
 
 from __future__ import annotations
@@ -56,8 +57,18 @@ class HorizonMCPClient:
 
     async def _call(self, tool: str, **kwargs: Any) -> Any:
         assert self._session, "Client not connected — use async with"
-        result = await self._session.call_tool(tool, arguments=kwargs)
+        # Drop None kwargs so optional server params fall back to their defaults.
+        args = {k: v for k, v in kwargs.items() if v is not None}
+        result = await self._session.call_tool(tool, arguments=args)
         return result
+
+    @staticmethod
+    def _first_text(result: Any) -> str:
+        """Best-effort status text from a tool result (some tools return no body)."""
+        content = getattr(result, "content", None) or []
+        if content and getattr(content[0], "text", None) is not None:
+            return content[0].text
+        return ""
 
     async def screenshot(self, screen: int = 0) -> bytes:
         """Return raw PNG bytes for the given monitor index."""
@@ -85,3 +96,72 @@ class HorizonMCPClient:
         """Type a string into the focused window."""
         result = await self._call("type_text", text=text)
         return result.content[0].text
+
+    # ----------------------------------------------------------- control tools
+    # These drive the remote session (mouse/keyboard). Input reaches the *remote*
+    # desktop only when the local Horizon client window has OS focus — callers
+    # (see RemoteController) focus it first.
+
+    async def click(self, x: int, y: int, button: str = "left") -> str:
+        """Click at a pixel coordinate."""
+        return self._first_text(await self._call("click", x=x, y=y, button=button))
+
+    async def double_click(self, x: int, y: int) -> str:
+        """Double-click at a pixel coordinate."""
+        return self._first_text(await self._call("double_click", x=x, y=y))
+
+    async def move_mouse(self, x: int, y: int) -> str:
+        """Move the cursor without clicking (hover)."""
+        return self._first_text(await self._call("move_mouse", x=x, y=y))
+
+    async def key_combo(
+        self, keys: list[str], times: int | None = None, hold_ms: int | None = None
+    ) -> str:
+        """Press a keyboard chord by virtual-key code (handles Win key + modifiers).
+
+        e.g. ["Win"] = Start, ["Win", "R"] = Run, ["Ctrl", "Alt", "Insert"] =
+        Ctrl+Alt+Del to the remote. Modifiers first, main key last.
+        """
+        return self._first_text(
+            await self._call("key_combo", keys=keys, times=times, holdMs=hold_ms)
+        )
+
+    async def paste_text(self, text: str) -> str:
+        """Place text on the clipboard and paste with Ctrl+V — more reliable than
+        type_text for password fields and arbitrary characters in a remote session."""
+        return self._first_text(await self._call("paste_text", text=text))
+
+    async def get_clipboard(self) -> str:
+        """Return the remote/host clipboard text."""
+        return self._first_text(await self._call("get_clipboard"))
+
+    async def set_clipboard(self, text: str) -> str:
+        """Write text to the clipboard (pass '' to clear a staged secret)."""
+        return self._first_text(await self._call("set_clipboard", text=text))
+
+    async def scroll(self, x: int, y: int, direction: str, amount: int | None = None) -> str:
+        """Scroll the mouse wheel at (x, y). direction is 'up' or 'down'."""
+        return self._first_text(
+            await self._call("scroll", x=x, y=y, direction=direction, amount=amount)
+        )
+
+    async def get_foreground_window(self) -> str:
+        """Return the title/info of the currently focused local window."""
+        return self._first_text(await self._call("get_foreground_window"))
+
+    async def ocr(
+        self,
+        x: int | None = None,
+        y: int | None = None,
+        width: int | None = None,
+        height: int | None = None,
+    ) -> str:
+        """Windows built-in OCR over the screen (or a region) — returns JSON text.
+        Free/offline; useful as a cheap change pre-filter before Claude Vision."""
+        return self._first_text(
+            await self._call("ocr", x=x, y=y, width=width, height=height)
+        )
+
+    async def wait(self, ms: int) -> str:
+        """Server-side pause to let the remote session catch up between actions."""
+        return self._first_text(await self._call("wait", ms=ms))

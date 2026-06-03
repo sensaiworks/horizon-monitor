@@ -135,6 +135,11 @@ python main.py query "what did John say about the deployment?"
 
 # Interactive Q&A REPL
 python main.py agent
+
+# Remote control (opt-in; requires [control].enabled = true)
+python main.py remote foreground
+python main.py remote launch "Microsoft Teams"
+python main.py remote unlock
 ```
 
 ## Configuration
@@ -156,13 +161,31 @@ optional remote-desktop password live in `.env`. See `config.example.toml` and
 `VOYAGE_API_KEY` is set; otherwise it falls back automatically to the offline
 `all-MiniLM-L6-v2` sentence-transformers model (~100 MB on first download).
 
+## Remote control (opt-in)
+
+Monitoring is read-only, but the tool can also *drive* the session when you ask it to —
+useful when a chat app is minimised inside the remote, or the desktop is locked. Actions
+are exposed in the tray and via `python main.py remote <action>`:
+
+- **Unlock** — sends Ctrl+Alt+Del to the remote and enters `HORIZON_PASSWORD` (pasted, then
+  the clipboard is restored so the secret doesn't linger).
+- **Launch / activate an app** — drives the remote's own Start menu
+  (`key_combo(["Win"])` → type name → Enter), since apps inside the VDI aren't local
+  windows and can't be focused directly.
+- **Bring Horizon to front**, **run a command**, **send a reply**.
+
+These are **write actions that type/click into a corporate desktop and steal local focus**,
+so they are gated behind `[control].enabled` (off by default), never run automatically, and
+only fire when you trigger them.
+
 ## Privacy & safety
 
-- **Read-only by default** — the monitor only screenshots, lists, and focuses windows.
-- **Local storage** — extracted chat lives in a local ChromaDB directory, never uploaded.
-- **Optional unlock only** — `HORIZON_PASSWORD` is read solely by the tray "Unlock Remote
-  Desktop" action, typed into the Horizon login prompt, and never logged or sent to any
-  API. Leave it blank to disable the feature entirely.
+- **Read-only monitoring** — the polling loop only screenshots, lists, and focuses windows;
+  it never types or clicks. Control actions are a separate, opt-in, user-triggered path.
+- **Local storage** — extracted chat lives in local ChromaDB + SQLite files, never uploaded.
+- **Secret handling** — `HORIZON_PASSWORD` is read only by the unlock action, pasted into the
+  login prompt, cleared from the clipboard afterward, and never logged or sent to any API.
+  Leave it blank (and `[control].enabled = false`) to disable the write path entirely.
 
 ## Project status
 

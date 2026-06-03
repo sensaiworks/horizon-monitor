@@ -30,3 +30,12 @@ cooldown_minutes = 5            # deduplicate window
 
 [user]
 display_name = "YourName"       # used in prompts to detect self-mentions
+
+[control]
+# Master switch for WRITE actions into the remote desktop (unlock, launch/activate
+# apps, send replies). These type/click into a corporate session and steal local
+# focus, so they are off by default and only ever run when YOU trigger them.
+enabled            = false
+focus_target       = "PVDI"     # local Horizon window to focus before sending input
+launch_wait_seconds = 1.5       # pause after Start-search / Enter for the remote to react
+# HORIZON_PASSWORD (in .env) is used only by the unlock action.

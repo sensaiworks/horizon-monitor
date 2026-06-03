@@ -143,6 +143,68 @@ def tray():
 
 
 @cli.command()
+@click.argument(
+    "action",
+    type=click.Choice(
+        ["unlock", "launch", "activate", "run", "foreground", "reply"]
+    ),
+)
+@click.argument("value", required=False, default="")
+def remote(action: str, value: str):
+    """Drive the remote Horizon session (WRITE actions; requires [control].enabled).
+
+    Examples:
+      python main.py remote foreground
+      python main.py remote launch "Microsoft Teams"
+      python main.py remote unlock
+      python main.py remote reply "on it, thanks"
+    """
+    config = load_config()
+    ctl = config.get("control", {})
+    if not ctl.get("enabled", False):
+        raise click.ClickException(
+            "Remote control disabled — set [control].enabled = true in config.toml"
+        )
+    asyncio.run(_run_remote(config, action, value))
+
+
+async def _run_remote(config: dict, action: str, value: str) -> None:
+    from src.mcp_client import HorizonMCPClient
+    from src.controller import RemoteController
+
+    mcp_cfg = config["mcp"]
+    ctl = config.get("control", {})
+
+    async with HorizonMCPClient(mcp_cfg["server_path"], mcp_cfg["command"]) as client:
+        c = RemoteController(
+            client,
+            focus_target=ctl.get("focus_target", "PVDI"),
+            launch_wait=ctl.get("launch_wait_seconds", 1.5),
+        )
+        print(f"remote: {action} {value!r}", flush=True)
+        if action == "foreground":
+            await c.bring_to_front()
+        elif action == "unlock":
+            password = os.environ.get("HORIZON_PASSWORD", "")
+            if not password:
+                raise click.ClickException("HORIZON_PASSWORD not set in .env")
+            await c.unlock(password)
+        elif action in ("launch", "activate"):
+            if not value:
+                raise click.ClickException(f"'{action}' needs an app name")
+            await c.launch_or_activate(value)
+        elif action == "run":
+            if not value:
+                raise click.ClickException("'run' needs a command")
+            await c.run_command(value)
+        elif action == "reply":
+            if not value:
+                raise click.ClickException("'reply' needs message text")
+            await c.send_reply(value)
+        print("remote: done", flush=True)
+
+
+@cli.command()
 @click.argument("question")
 def query(question: str):
     """Ask a question about recorded conversations."""

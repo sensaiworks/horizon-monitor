@@ -30,6 +30,7 @@ from .agent import QueryAgent
 from .extractor import Extractor
 from .mcp_client import HorizonMCPClient
 from .models import MessageEvent
+from .controller import RemoteController
 from .notifier import Notifier
 from .poller import Poller
 from .rag import RAGPipeline
@@ -60,6 +61,7 @@ class TrayApp:
     def __init__(self, config: dict, api_key: str) -> None:
         self._config = config
         self._api_key = api_key
+        self._control_enabled = bool(config.get("control", {}).get("enabled", False))
         self._status = "stopped"
         self._remote_locked = False
         self._last_event: MessageEvent | None = None
@@ -130,8 +132,16 @@ class TrayApp:
         else:
             items.append(pystray.MenuItem("Start", self._on_start))
 
-        if self._remote_locked:
+        if self._remote_locked and self._control_enabled:
             items.append(pystray.MenuItem("Unlock Remote Desktop", self._on_unlock))
+
+        # Remote-control actions — only when explicitly enabled in config.
+        if self._control_enabled:
+            items += [
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Launch / activate app on remote…", self._on_launch_app),
+                pystray.MenuItem("Bring Horizon to front", self._on_bring_to_front),
+            ]
 
         items += [
             pystray.Menu.SEPARATOR,
@@ -177,6 +187,19 @@ class TrayApp:
 
     def _on_unlock(self, icon, item) -> None:
         threading.Thread(target=self._unlock_worker, daemon=True).start()
+
+    def _on_bring_to_front(self, icon, item) -> None:
+        self._run_control("bring Horizon to front", lambda c: c.bring_to_front())
+
+    def _on_launch_app(self, icon=None, item=None) -> None:
+        # Ask for the app name on a Tk thread, then run the action.
+        def worker() -> None:
+            app = self._prompt_text("Launch / activate app on remote",
+                                     "App name (as in the remote Start menu):")
+            if app:
+                self._run_control(f"launch/activate '{app}'",
+                                  lambda c: c.launch_or_activate(app))
+        threading.Thread(target=worker, daemon=True).start()
 
     # --------------------------------------------------- monitor lifecycle
 
@@ -357,31 +380,56 @@ class TrayApp:
         entry.bind("<Return>", lambda e: ask())
         root.mainloop()
 
-    # --------------------------------------------------------- Unlock
+    # --------------------------------------------------- remote control
+
+    def _prompt_text(self, title: str, label: str) -> str:
+        """Modal single-line input dialog. Returns "" if cancelled."""
+        import tkinter as tk
+        from tkinter import simpledialog
+
+        root = tk.Tk()
+        root.withdraw()
+        value = simpledialog.askstring(title, label, parent=root)
+        root.destroy()
+        return (value or "").strip()
+
+    def _controller(self, client: HorizonMCPClient) -> RemoteController:
+        ctl = self._config.get("control", {})
+        return RemoteController(
+            client,
+            focus_target=ctl.get("focus_target", "PVDI"),
+            launch_wait=ctl.get("launch_wait_seconds", 1.5),
+        )
+
+    def _run_control(self, label, action) -> None:
+        """Run one controller coroutine on its own loop + MCP client, off the UI thread.
+
+        `action` is a callable taking a RemoteController and returning a coroutine.
+        """
+        if not self._control_enabled:
+            print("Remote control disabled — set [control].enabled=true in config.toml", flush=True)
+            return
+
+        def worker() -> None:
+            async def go() -> None:
+                cfg = self._config
+                async with HorizonMCPClient(cfg["mcp"]["server_path"], cfg["mcp"]["command"]) as client:
+                    await action(self._controller(client))
+            print(f"Remote: {label}…", flush=True)
+            try:
+                asyncio.run(go())
+                print(f"Remote: {label} — done", flush=True)
+            except Exception as exc:
+                print(f"Remote: {label} failed: {exc}", flush=True)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _unlock_worker(self) -> None:
-        asyncio.run(self._unlock_async())
-
-    async def _unlock_async(self) -> None:
         password = os.environ.get("HORIZON_PASSWORD", "")
         if not password:
             print("HORIZON_PASSWORD not set in .env — cannot unlock", flush=True)
             return
-
-        cfg = self._config
-        print("Unlocking remote desktop…", flush=True)
-        try:
-            async with HorizonMCPClient(cfg["mcp"]["server_path"], cfg["mcp"]["command"]) as client:
-                await client.focus_window("PVDI")
-                await asyncio.sleep(0.5)
-                await client.press_key("Ctrl+Alt+Insert")   # Horizon's Ctrl+Alt+Del
-                await asyncio.sleep(2.5)                    # wait for login prompt
-                await client.type_text(password)
-                await asyncio.sleep(0.3)
-                await client.press_key("Enter")
-            print("Unlock sequence sent", flush=True)
-        except Exception as exc:
-            print(f"Unlock failed: {exc}", flush=True)
+        self._run_control("unlock remote desktop", lambda c: c.unlock(password))
 
     # -------------------------------------------------------------- entry
 
