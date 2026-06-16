@@ -31,6 +31,12 @@ cooldown_minutes = 5            # deduplicate window
 [user]
 display_name = "YourName"       # used in prompts to detect self-mentions
 
+[retention]
+# How long to keep captured conversation data. On `monitor` startup, events older
+# than this are deleted from both SQLite and ChromaDB. 0 = keep everything forever.
+# You can also trim/wipe manually any time: `python main.py purge [--older-than N]`.
+retain_days = 0
+
 [control]
 # Master switch for WRITE actions into the remote desktop (unlock, launch/activate
 # apps, send replies). These type/click into a corporate session and steal local
@@ -38,4 +44,9 @@ display_name = "YourName"       # used in prompts to detect self-mentions
 enabled            = false
 focus_target       = "PVDI"     # local Horizon window to focus before sending input
 launch_wait_seconds = 1.5       # pause after Start-search / Enter for the remote to react
+# Code-editing bridge (read-file/write-file): pull a file out of the remote editor,
+# edit it locally, paste the whole document back. Relies on Horizon clipboard
+# redirection being enabled (it usually is); read-file reports clearly if it isn't.
+clipboard_sync_seconds = 0.6    # time for the clipboard to sync local <-> remote
+copy_timeout_seconds   = 6.0    # give up waiting for a copied file to arrive after this
 # HORIZON_PASSWORD (in .env) is used only by the unlock action.

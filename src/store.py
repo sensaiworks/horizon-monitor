@@ -117,6 +117,26 @@ class EventStore:
         sql += " ORDER BY observed_at ASC"
         return [dict(r) for r in self._conn.execute(sql, params).fetchall()]
 
+    def expire_older_than(self, cutoff_iso: str) -> int:
+        """Delete events captured before cutoff_iso (for N-day retention).
+
+        observed_at is ISO-8601 UTC, which sorts lexically, so a string `<`
+        comparison is correct. Returns the number of rows removed.
+        """
+        assert self._conn is not None, "call connect() first"
+        cur = self._conn.execute(
+            "DELETE FROM events WHERE observed_at < ?", (cutoff_iso,)
+        )
+        self._conn.commit()
+        return cur.rowcount
+
+    def purge_all(self) -> int:
+        """Delete every stored event (the one-shot 'purge all'). Returns rows removed."""
+        assert self._conn is not None, "call connect() first"
+        cur = self._conn.execute("DELETE FROM events")
+        self._conn.commit()
+        return cur.rowcount
+
     def speakers(self) -> list[str]:
         assert self._conn is not None, "call connect() first"
         rows = self._conn.execute(

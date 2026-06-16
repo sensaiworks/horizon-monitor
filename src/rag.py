@@ -161,6 +161,24 @@ class RAGPipeline:
             })
         return output
 
+    def delete_older_than(self, cutoff_iso: str) -> None:
+        """Remove vectors captured before cutoff_iso (for N-day retention).
+
+        ISO-8601 timestamps sort lexically, so a string $lt comparison is correct.
+        Mirrors EventStore.expire_older_than so both stores stay in sync.
+        """
+        if self._collection is None:
+            return
+        self._collection.delete(where={"timestamp": {"$lt": cutoff_iso}})
+
+    def purge_all(self) -> None:
+        """Delete every vector in the collection (one-shot 'purge all')."""
+        if self._client is None or self._collection is None:
+            return
+        self._client.delete_collection(self._collection.name)
+        # Recreate empty so the pipeline stays usable without reconnecting.
+        self.connect()
+
     def format_context(self, results: list[dict]) -> str:
         """Format RAG results as context string for the query agent prompt.
 

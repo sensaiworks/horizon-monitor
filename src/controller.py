@@ -23,8 +23,34 @@ remote desktop and steal local focus. They must be user-triggered, never automat
 from __future__ import annotations
 
 import asyncio
+import json
 
 from .mcp_client import HorizonMCPClient
+
+
+def _merge_overlap(acc: list[str], new: list[str]) -> int:
+    """Append the non-overlapping tail of `new` onto `acc` in place; return lines added.
+
+    Between two consecutive scroll captures the bottom of the old view repeats at the
+    top of the new one. Find the largest k where acc's last k lines equal new's first k
+    (the scroll overlap) and append only new[k:]; with no overlap, append all of `new`.
+    Whitespace is normalized to absorb minor OCR jitter. Best-effort: OCR variance can
+    occasionally misjudge the overlap, so callers treat the stitched result as a draft.
+    """
+    def norm(s: str) -> str:
+        return " ".join(s.split())
+
+    if not new:
+        return 0
+    na = [norm(s) for s in acc]
+    nn = [norm(s) for s in new]
+    for k in range(min(len(na), len(nn)), 0, -1):
+        if na[-k:] == nn[:k]:
+            tail = new[k:]
+            acc.extend(tail)
+            return len(tail)
+    acc.extend(new)
+    return len(new)
 
 
 class RemoteController:
@@ -33,10 +59,16 @@ class RemoteController:
         client: HorizonMCPClient,
         focus_target: str = "PVDI",
         launch_wait: float = 1.5,
+        clipboard_sync: float = 0.6,
+        copy_timeout: float = 6.0,
     ) -> None:
         self._client = client
         self._focus_target = focus_target
         self._launch_wait = launch_wait
+        # How long redirection takes to sync the clipboard between local and remote,
+        # and how long to wait for a copied file to arrive before giving up.
+        self._clipboard_sync = clipboard_sync
+        self._copy_timeout = copy_timeout
 
     async def ensure_foreground(self) -> None:
         """Bring the local Horizon client to the foreground so input reaches the remote."""
@@ -123,3 +155,207 @@ class RemoteController:
         """Scroll the chat pane at (x, y) to reveal earlier/later messages."""
         await self.ensure_foreground()
         await self._client.scroll(x, y, direction, amount)
+
+    # ------------------------------------------------------- code-editing bridge
+    # Pull a file's text out of the remote editor, edit it locally (with AI that
+    # isn't available inside the VDI), and push the whole document back.
+    #
+    # The transport is the clipboard, NOT OCR. OCR loses indentation and only sees
+    # the visible region; type_text corrupts code via the editor's autocomplete /
+    # auto-indent. A Ctrl+A/Ctrl+C in the remote editor copies the *entire* file
+    # exactly; Horizon clipboard redirection syncs it to the local clipboard, where
+    # get_clipboard() reads it losslessly. The write path is the mirror image.
+    #
+    # PREREQUISITE: Horizon clipboard redirection must be enabled (it usually is).
+    # copy_from_remote() detects when it is not and raises a clear error.
+    # PREREQUISITE: the editor pane (not a sidebar/terminal) must hold focus inside
+    # the remote so Ctrl+A selects the document — screenshot first if unsure.
+
+    # Null bytes can't appear in a text file, so this never collides with content.
+    _COPY_SENTINEL = "\x00__horizon_pull__\x00"
+
+    async def copy_from_remote(self) -> str:
+        """Select-all + copy in the focused remote editor; return the full text.
+
+        Seeds the local clipboard with a sentinel, triggers the remote copy, then
+        polls until clipboard redirection delivers the file. Raises RuntimeError if
+        the clipboard never changes (redirection disabled, or nothing was focused).
+        """
+        await self.ensure_foreground()
+        await self._client.set_clipboard(self._COPY_SENTINEL)
+        await asyncio.sleep(self._clipboard_sync)
+        await self._client.key_combo(["Ctrl", "A"])
+        await asyncio.sleep(0.2)
+        await self._client.key_combo(["Ctrl", "C"])
+
+        waited = 0.0
+        poll = 0.3
+        while waited < self._copy_timeout:
+            await asyncio.sleep(poll)
+            waited += poll
+            text = await self._client.get_clipboard()
+            if text and text != self._COPY_SENTINEL:
+                return text
+        raise RuntimeError(
+            "Clipboard did not update after Ctrl+C — Horizon clipboard redirection "
+            "may be disabled, or no editor pane was focused in the remote session."
+        )
+
+    async def paste_to_remote(
+        self, text: str, *, replace_all: bool = True, save: bool = False
+    ) -> None:
+        """Replace the focused remote editor's contents with `text`.
+
+        Stages `text` on the local clipboard (redirection syncs it to the remote),
+        selects all + pastes, optionally saves, then restores the prior clipboard.
+        """
+        await self.ensure_foreground()
+        prior = ""
+        try:
+            prior = await self._client.get_clipboard()
+        except Exception:
+            pass
+        try:
+            await self._client.set_clipboard(text)
+            await asyncio.sleep(self._clipboard_sync)  # let redirection reach the remote
+            if replace_all:
+                await self._client.key_combo(["Ctrl", "A"])
+                await asyncio.sleep(0.15)
+            await self._client.key_combo(["Ctrl", "V"])
+            await asyncio.sleep(self._clipboard_sync)   # let the paste land
+            if save:
+                await self._client.key_combo(["Ctrl", "S"])
+                await asyncio.sleep(0.3)
+        finally:
+            try:
+                await self._client.set_clipboard(prior or "")
+            except Exception:
+                pass
+
+    async def open_file(self, path: str) -> None:
+        """Open `path` in the remote VS Code via the Quick Open palette (Ctrl+P)."""
+        await self.ensure_foreground()
+        await self._client.key_combo(["Ctrl", "P"])
+        await asyncio.sleep(0.4)
+        await self._client.type_text(path)
+        await asyncio.sleep(0.5)
+        await self._client.key_combo(["Enter"])
+        await asyncio.sleep(0.4)
+
+    # ------------------------------------------------- OCR read bridge (DLP mode)
+    # When the VDI blocks clipboard copy-OUT (remote -> local) — a common DLP
+    # policy — copy_from_remote() above cannot work: there is no lossless channel
+    # to get text off the remote. The only one left is the screen itself, so we
+    # READ via screenshot + Windows OCR, scrolling the pane and stitching captures
+    # for content taller than one screen. OCR is LOSSY: it confuses 1/l/I, drops
+    # indentation, and mangles symbols — so treat anything read back as a DRAFT to
+    # verify, never as source of truth, especially for code.
+    #
+    # The WRITE direction is unaffected: paste-IN (local -> remote) is allowed, so
+    # paste_to_remote() and paste_at() stage the local clipboard and Ctrl+V.
+    #
+    # REGION COORDS: the optional `region` is in ACTUAL screen pixels, which differ
+    # from screenshot pixels under Windows display scaling — coordinates eyeballed
+    # off a screenshot will miss. Prefer full-screen OCR (region=None); it needs no
+    # coordinates and is the reliable default.
+
+    async def _ocr_lines(self, region: tuple[int, int, int, int] | None) -> list[str]:
+        """OCR the screen (or an x,y,w,h region) and return its non-blank text lines."""
+        if region:
+            x, y, w, h = region
+            raw = await self._client.ocr(x=x, y=y, width=w, height=h)
+        else:
+            raw = await self._client.ocr()
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return []
+        return [ln for ln in (data.get("lines") or []) if ln.strip()]
+
+    async def read_screen(
+        self, region: tuple[int, int, int, int] | None = None
+    ) -> str:
+        """One-shot OCR of the remote screen (or a region). Lossy — verify any code."""
+        await self.ensure_foreground()
+        await asyncio.sleep(0.3)
+        return "\n".join(await self._ocr_lines(region))
+
+    async def read_scrolling(
+        self,
+        x: int,
+        y: int,
+        region: tuple[int, int, int, int] | None = None,
+        max_screens: int = 12,
+        scroll_amount: int = 3,
+        settle: float = 0.6,
+    ) -> tuple[str, int]:
+        """Read a pane taller than one screen: OCR, scroll DOWN at (x, y), OCR again,
+        stitching captures with overlap-dedup. Stops at the bottom (the view stops
+        moving, or a capture adds nothing) or after max_screens. Returns
+        (text, screens_captured).
+
+        Scroll the pane to the TOP first (the caller's job) so this reads top-to-
+        bottom. OCR is lossy and the overlap match is best-effort — verify the result.
+        """
+        await self.ensure_foreground()
+        acc: list[str] = await self._ocr_lines(region)
+        prev_norm = [" ".join(s.split()) for s in acc]
+        screens = 1
+        for _ in range(max_screens - 1):
+            await self._client.scroll(x, y, "down", scroll_amount)
+            await asyncio.sleep(settle)
+            new = await self._ocr_lines(region)
+            new_norm = [" ".join(s.split()) for s in new]
+            if new_norm == prev_norm:
+                break  # the view did not move — bottom reached (or scroll missed)
+            added = _merge_overlap(acc, new)
+            prev_norm = new_norm
+            screens += 1
+            if added == 0:
+                break  # everything new overlapped what we have — at the bottom
+        return "\n".join(acc), screens
+
+    async def paste_at(
+        self,
+        text: str,
+        x: int | None = None,
+        y: int | None = None,
+        double: bool = False,
+        save: bool = False,
+        submit: bool = False,
+    ) -> None:
+        """Paste `text` into the remote at the cursor — write-IN is allowed under DLP.
+
+        If (x, y) is given, click there first to focus the target app/field; pass
+        double=True for the apps that need two clicks to take focus. Stages the local
+        clipboard, Ctrl+V, then optionally Ctrl+S (save) or Enter (submit), and
+        restores the prior clipboard. Unlike paste_to_remote() this does NOT select-
+        all, so it inserts at the cursor instead of replacing the whole document.
+        """
+        await self.ensure_foreground()
+        if x is not None and y is not None:
+            if double:
+                await self._client.double_click(x, y)
+            else:
+                await self._client.click(x, y)
+            await asyncio.sleep(0.3)
+        prior = ""
+        try:
+            prior = await self._client.get_clipboard()
+        except Exception:
+            pass
+        try:
+            await self._client.set_clipboard(text)
+            await asyncio.sleep(self._clipboard_sync)  # let it reach the remote
+            await self._client.key_combo(["Ctrl", "V"])
+            await asyncio.sleep(self._clipboard_sync)  # let the paste land
+            if save:
+                await self._client.key_combo(["Ctrl", "S"])
+                await asyncio.sleep(0.3)
+            elif submit:
+                await self._client.key_combo(["Enter"])
+        finally:
+            try:
+                await self._client.set_clipboard(prior or "")
+            except Exception:
+                pass

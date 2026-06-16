@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 try:
@@ -98,6 +99,16 @@ async def _run_monitor(config: dict, dry_run: bool) -> None:
     store = EventStore(rag_cfg.get("events_db", "./data/events.db"))
     store.connect()
 
+    # Optional retention: drop data older than [retention].retain_days on startup so a
+    # long-running monitor doesn't accumulate forever. 0/absent = keep everything.
+    retain_days = int(config.get("retention", {}).get("retain_days", 0) or 0)
+    if retain_days > 0:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=retain_days)).isoformat()
+        removed = store.expire_older_than(cutoff)
+        rag.delete_older_than(cutoff)
+        if removed:
+            print(f"retention: dropped {removed} event(s) older than {retain_days}d", flush=True)
+
     async with HorizonMCPClient(
         server_path=mcp_cfg["server_path"],
         command=mcp_cfg["command"],
@@ -142,22 +153,69 @@ def tray():
     TrayApp(config, api_key).run()
 
 
+def _parse_coords(s: str, n: int, what: str) -> tuple[int, ...]:
+    """Parse a comma-separated integer tuple like '120,340' or '0,0,800,600'."""
+    try:
+        parts = tuple(int(p.strip()) for p in s.split(","))
+    except ValueError:
+        raise click.ClickException(f"{what} must be {n} comma-separated integers, got {s!r}")
+    if len(parts) != n:
+        raise click.ClickException(f"{what} must have {n} values, got {len(parts)}")
+    return parts
+
+
 @cli.command()
 @click.argument(
     "action",
     type=click.Choice(
-        ["unlock", "launch", "activate", "run", "foreground", "reply"]
+        [
+            "unlock", "launch", "activate", "run", "foreground", "reply",
+            "read-file", "write-file", "open",
+            "read-screen", "read-scroll", "paste",
+        ]
     ),
 )
 @click.argument("value", required=False, default="")
-def remote(action: str, value: str):
-    """Drive the remote Horizon session (WRITE actions; requires [control].enabled).
+@click.option(
+    "--out", default="",
+    help="read-*: write the captured text to this local file instead of stdout",
+)
+@click.option(
+    "--save/--no-save", default=False,
+    help="write-file/paste: press Ctrl+S in the remote after pasting",
+)
+@click.option(
+    "--region", default="",
+    help="read-screen/read-scroll: OCR only this 'x,y,w,h' region in ACTUAL screen "
+         "pixels (not screenshot pixels — they differ under display scaling). Omit "
+         "to OCR the full screen, which needs no coordinates.",
+)
+@click.option(
+    "--at", "at", default="",
+    help="paste: click 'x,y' to focus the target before pasting",
+)
+@click.option(
+    "--double", is_flag=True,
+    help="paste: double-click the --at point (some apps need two clicks to focus)",
+)
+def remote(action: str, value: str, out: str, save: bool, region: str, at: str, double: bool):
+    """Drive the remote Horizon session (WRITE/READ actions; requires [control].enabled).
 
     Examples:
       python main.py remote foreground
       python main.py remote launch "Microsoft Teams"
       python main.py remote unlock
       python main.py remote reply "on it, thanks"
+
+    OCR read bridge (for VDIs that block clipboard copy-out — reads via screenshot+OCR):
+      python main.py remote read-screen --out data/screen.txt
+      python main.py remote read-scroll 960,500 --out data/pane.txt   # scroll-stitch a pane
+      python main.py remote paste data/reply.txt --at 700,980 --double # focus + paste-in
+
+    Clipboard code bridge (only where copy-out is allowed; read-file fails otherwise):
+      python main.py remote open "src/app.py"
+      python main.py remote read-file --out data/pull.txt
+      python main.py remote write-file data/pull.txt --save
     """
     config = load_config()
     ctl = config.get("control", {})
@@ -165,21 +223,36 @@ def remote(action: str, value: str):
         raise click.ClickException(
             "Remote control disabled — set [control].enabled = true in config.toml"
         )
-    asyncio.run(_run_remote(config, action, value))
+    asyncio.run(_run_remote(config, action, value, out, save, region, at, double))
 
 
-async def _run_remote(config: dict, action: str, value: str) -> None:
+async def _run_remote(
+    config: dict, action: str, value: str, out: str, save: bool,
+    region: str = "", at: str = "", double: bool = False,
+) -> None:
     from src.mcp_client import HorizonMCPClient
     from src.controller import RemoteController
 
     mcp_cfg = config["mcp"]
     ctl = config.get("control", {})
+    region_box = _parse_coords(region, 4, "--region") if region else None
+
+    def _emit(text: str, label: str) -> None:
+        if out:
+            out_path = Path(out)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(text, encoding="utf-8")
+            print(f"remote: {label} {len(text)} chars -> {out}", flush=True)
+        else:
+            print(text)
 
     async with HorizonMCPClient(mcp_cfg["server_path"], mcp_cfg["command"]) as client:
         c = RemoteController(
             client,
             focus_target=ctl.get("focus_target", "PVDI"),
             launch_wait=ctl.get("launch_wait_seconds", 1.5),
+            clipboard_sync=ctl.get("clipboard_sync_seconds", 0.6),
+            copy_timeout=ctl.get("copy_timeout_seconds", 6.0),
         )
         print(f"remote: {action} {value!r}", flush=True)
         if action == "foreground":
@@ -201,6 +274,45 @@ async def _run_remote(config: dict, action: str, value: str) -> None:
             if not value:
                 raise click.ClickException("'reply' needs message text")
             await c.send_reply(value)
+        elif action == "open":
+            if not value:
+                raise click.ClickException("'open' needs a file path")
+            await c.open_file(value)
+        elif action == "read-file":
+            text = await c.copy_from_remote()
+            _emit(text, "pulled")
+        elif action == "write-file":
+            if not value:
+                raise click.ClickException("'write-file' needs a local file path")
+            text = Path(value).read_text(encoding="utf-8")
+            await c.paste_to_remote(text, replace_all=True, save=save)
+            print(
+                f"remote: pasted {len(text)} chars from {value}"
+                f"{' and saved' if save else ''}",
+                flush=True,
+            )
+        elif action == "read-screen":
+            text = await c.read_screen(region=region_box)
+            _emit(text, "ocr")
+        elif action == "read-scroll":
+            if not value:
+                raise click.ClickException("'read-scroll' needs an 'x,y' scroll point")
+            sx, sy = _parse_coords(value, 2, "read-scroll point")
+            text, screens = await c.read_scrolling(sx, sy, region=region_box)
+            _emit(text, f"ocr ({screens} screen(s))")
+        elif action == "paste":
+            if not value:
+                raise click.ClickException("'paste' needs a local file path (text to paste)")
+            text = Path(value).read_text(encoding="utf-8")
+            ax = ay = None
+            if at:
+                ax, ay = _parse_coords(at, 2, "--at")
+            await c.paste_at(text, x=ax, y=ay, double=double, save=save)
+            print(
+                f"remote: pasted {len(text)} chars from {value}"
+                f"{f' at {ax},{ay}' if at else ''}{' and saved' if save else ''}",
+                flush=True,
+            )
         print("remote: done", flush=True)
 
 
@@ -219,6 +331,65 @@ def agent():
     config = load_config()
     api_key = require_api_key()
     _run_query(config, api_key, question=None)
+
+
+@cli.command()
+@click.option(
+    "--older-than", type=int, default=None, metavar="DAYS",
+    help="Delete only events older than DAYS days. Omit to purge everything.",
+)
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+def purge(older_than: int | None, yes: bool):
+    """Trim or wipe stored conversation data (SQLite + ChromaDB).
+
+    \b
+    python main.py purge                  # delete ALL stored events (asks to confirm)
+    python main.py purge --older-than 30  # delete events older than 30 days
+    """
+    config = load_config()
+    if older_than is not None and older_than < 0:
+        raise click.ClickException("--older-than must be >= 0")
+
+    if older_than is None:
+        if not yes and not click.confirm(
+            "This deletes ALL stored events from SQLite and ChromaDB. Continue?"
+        ):
+            raise click.ClickException("Aborted.")
+    _run_purge(config, older_than)
+
+
+def _run_purge(config: dict, older_than: int | None) -> int:
+    """Apply retention/purge to both stores. Returns SQLite rows removed.
+
+    Shared by the `purge` command and the monitor's startup auto-retention.
+    """
+    from src.rag import RAGPipeline
+    from src.store import EventStore
+
+    rag_cfg = config["rag"]
+
+    store = EventStore(rag_cfg.get("events_db", "./data/events.db"))
+    store.connect()
+    rag = RAGPipeline(
+        db_path=rag_cfg["db_path"],
+        collection_name=rag_cfg["collection_name"],
+        embedding_provider=rag_cfg["embedding_provider"],
+        voyage_api_key=os.environ.get("VOYAGE_API_KEY") or None,
+        top_k=rag_cfg["top_k"],
+    )
+    rag.connect()
+
+    if older_than is None:
+        removed = store.purge_all()
+        rag.purge_all()
+        print(f"purge: removed all {removed} event(s) from SQLite + ChromaDB", flush=True)
+    else:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than)).isoformat()
+        removed = store.expire_older_than(cutoff)
+        rag.delete_older_than(cutoff)
+        print(f"purge: removed {removed} event(s) older than {older_than}d", flush=True)
+    store.close()
+    return removed
 
 
 def _run_query(config: dict, api_key: str, question: str | None) -> None:

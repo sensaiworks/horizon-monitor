@@ -140,6 +140,11 @@ python main.py agent
 python main.py remote foreground
 python main.py remote launch "Microsoft Teams"
 python main.py remote unlock
+
+# Code-editing bridge: pull a file out of remote VS Code, edit locally, push it back
+python main.py remote open "src/app.py"             # focus the file in the remote editor
+python main.py remote read-file --out data/pull.txt # copy the whole file to a local file
+python main.py remote write-file data/pull.txt --save
 ```
 
 ## Configuration
@@ -177,6 +182,48 @@ are exposed in the tray and via `python main.py remote <action>`:
 These are **write actions that type/click into a corporate desktop and steal local focus**,
 so they are gated behind `[control].enabled` (off by default), never run automatically, and
 only fire when you trigger them.
+
+### Code-editing bridge
+
+Corporate VDIs often run an IDE (e.g. VS Code) but block AI assistants inside the session.
+This bridge brings the AI to the code: it pulls a file out of the remote editor, lets a
+local agent edit it, and pastes the whole document back.
+
+The transport is the **clipboard**, not OCR — `Ctrl+A`/`Ctrl+C` in the remote editor copies
+the *entire* file exactly, Horizon clipboard redirection syncs it to the local clipboard,
+and `read-file` captures it losslessly (OCR would drop indentation and off-screen lines;
+typing code back in would be mangled by autocomplete). `write-file` is the mirror: it stages
+the new text, selects all, pastes, and optionally saves.
+
+```powershell
+python main.py remote open "src/app.py"              # 1. focus the file in remote VS Code
+python main.py remote read-file --out data/pull.txt  # 2. pull it out losslessly
+#    3. edit data/pull.txt locally (by hand or with an AI agent)
+python main.py remote write-file data/pull.txt --save # 4. replace the remote document
+```
+
+This requires Horizon **clipboard redirection** to be enabled (it usually is); `read-file`
+reports a clear error if the clipboard never updates after the copy. The remote **editor
+pane** must hold focus so `Ctrl+A` selects the document.
+
+### OCR read bridge (for one-way-clipboard / DLP sessions)
+
+Many corporate VDIs allow paste **in** but block copy **out** (a one-way-clipboard DLP
+policy). There the clipboard bridge above can't read — there is no lossless way to get text
+off the remote — so the read path falls back to the screen itself: **screenshot + Windows
+OCR**, scrolling the pane and stitching captures for content taller than one screen. The
+write path is unchanged (paste-in is allowed).
+
+```powershell
+python main.py remote read-screen --out data/screen.txt           # OCR the screen
+python main.py remote read-scroll 960,500 --out data/pane.txt      # scroll + stitch a pane
+python main.py remote paste data/reply.txt --at 700,980 --double   # click-to-focus, paste-in
+```
+
+OCR is **lossy** — it confuses `1`/`l`/`I`, drops indentation, and mangles symbols — so treat
+anything read back through this path as a **draft to verify**, never source-of-truth,
+especially for code. (`--region` takes *actual* screen-pixel coordinates, which differ from
+screenshot pixels under display scaling; omit it to OCR the full screen.)
 
 ## Privacy & safety
 
