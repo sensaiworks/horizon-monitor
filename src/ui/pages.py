@@ -19,7 +19,7 @@ from PySide6.QtCore import Qt, QObject, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QPlainTextEdit, QPushButton, QRadioButton, QScrollArea, QSpinBox,
+    QListWidgetItem, QPlainTextEdit, QPushButton, QRadioButton, QScrollArea, QSpinBox,
     QVBoxLayout, QWidget,
 )
 
@@ -232,25 +232,208 @@ class MonitorPage(QWidget):
 
 # ----------------------------------------------------------------- preview tabs
 
+class _CollectSignals(QObject):
+    status = Signal(str)
+    refreshed = Signal(dict, list)   # stats dict, channel list
+
+
 class CollectPage(QWidget):
-    def __init__(self) -> None:
+    """Record selected channels into the knowledge base + manage what's stored.
+
+    The channel picker / record toggle feed the engine's collect sink (the main window
+    syncs them). Stats + purge talk straight to EventStore/RAGPipeline (same stores the
+    engine writes); reads are instant via SQLite, purges run on a worker thread.
+    """
+
+    def __init__(self, config: dict, api_key: str = "") -> None:
         super().__init__()
+        self._config = config
+        self._store = None   # lazy EventStore (SQLite — fast, read on the UI thread)
+
+        self._sig = _CollectSignals()
+        self._sig.status.connect(self._set_status)
+        self._sig.refreshed.connect(self._apply_refresh)
+
         page, body = _page_scaffold(
             "Collect",
-            "Record selected channels into a private knowledge base you can question later.",
+            "Record conversations into a private, on-disk knowledge base you can question "
+            "in the Ask tab. Choose which channels to keep, and prune what you don't.",
         )
-        c1, l1 = _card("Channels to collect",
-                       "Channels fill in here as they're seen on screen — tick the ones to keep.")
-        l1.addWidget(_coming_soon("Channel picker + allow-all, wired to the capture engine."))
-        body.addWidget(c1)
-        c2, l2 = _card("Knowledge base", "Stored events, channels, date range, size.")
-        l2.addWidget(_coming_soon("Stats card + Purge / retention controls (already in backend)."))
-        body.addWidget(c2)
-        c3, l3 = _card("Ask the knowledge base")
-        l3.addWidget(_coming_soon("Embedded Q&A — for now use the Ask tab."))
-        body.addWidget(c3)
+
+        # Record on/off
+        rec_card, rl = _card()
+        rec_row = QHBoxLayout()
+        self.record = QCheckBox("Record conversations to the knowledge base")
+        self.record.setFont(QFont("Segoe UI", 11))
+        self.record.setChecked(True)
+        rec_row.addWidget(self.record)
+        rec_row.addStretch(1)
+        rl.addLayout(rec_row)
+        body.addWidget(rec_card)
+
+        # Channels
+        ch_card, cl = _card(
+            "Channels to collect",
+            "Collect everything, or tick the channels to keep. They appear here as "
+            "they're seen on screen — Refresh after new ones show up.",
+        )
+        self.collect_all = QCheckBox("Collect all channels")
+        self.collect_all.setChecked(True)
+        cl.addWidget(self.collect_all)
+        self.channels = QListWidget()
+        self.channels.setMaximumHeight(150)
+        cl.addWidget(self.channels)
+        refresh_btn = QPushButton("Refresh channels")
+        cl.addWidget(refresh_btn, 0, Qt.AlignLeft)
+        body.addWidget(ch_card)
+
+        # Knowledge base stats + purge
+        kb_card, kl = _card("Knowledge base")
+        self.stats_label = QLabel("…")
+        self.stats_label.setWordWrap(True)
+        kl.addWidget(self.stats_label)
+
+        older_row = QHBoxLayout()
+        older_row.addWidget(QLabel("Delete events older than"))
+        self.older_days = QSpinBox()
+        self.older_days.setRange(1, 365)
+        self.older_days.setValue(30)
+        self.older_days.setSuffix(" days")
+        older_row.addWidget(self.older_days)
+        self.btn_older = QPushButton("Delete")
+        older_row.addWidget(self.btn_older)
+        older_row.addStretch(1)
+        kl.addLayout(older_row)
+
+        self.btn_purge = QPushButton("Purge everything…")
+        kl.addWidget(self.btn_purge, 0, Qt.AlignLeft)
+        body.addWidget(kb_card)
+
+        self.status = QLabel("")
+        self.status.setObjectName("Dim")
+        self.status.setWordWrap(True)
+        body.addWidget(self.status)
         body.addStretch(1)
         QVBoxLayout(self).addWidget(page)
+
+        self.collect_all.toggled.connect(lambda on: self.channels.setEnabled(not on))
+        refresh_btn.clicked.connect(self.refresh)
+        self.btn_older.clicked.connect(self._delete_older)
+        self.btn_purge.clicked.connect(self._purge_all)
+        self.channels.setEnabled(not self.collect_all.isChecked())
+        self.refresh()
+
+    # ------------------------------------------------------------ helpers
+
+    def _set_status(self, text: str) -> None:
+        self.status.setText(text)
+
+    def _store_conn(self):
+        if self._store is None:
+            from src.store import EventStore
+            self._store = EventStore(
+                self._config["rag"].get("events_db", "./data/events.db")
+            )
+            self._store.connect()
+        return self._store
+
+    def selected_channels(self) -> list[str]:
+        out = []
+        for i in range(self.channels.count()):
+            it = self.channels.item(i)
+            if it.checkState() == Qt.CheckState.Checked:
+                out.append(it.text())
+        return out
+
+    def refresh(self) -> None:
+        try:
+            store = self._store_conn()
+            self._apply_refresh(store.stats(), store.channels())
+        except Exception as exc:  # noqa: BLE001
+            self._set_status(f"Could not read the store: {exc}")
+
+    def _apply_refresh(self, stats: dict, channels: list) -> None:
+        total = stats.get("total", 0)
+        first, last = stats.get("first"), stats.get("last")
+        span = f"{first[:10]} → {last[:10]}" if first else "no events yet"
+        top = ", ".join(f"{c} ({n})" for c, n in stats.get("channels", [])[:5]) or "—"
+        self.stats_label.setText(
+            f"{total} event(s) · {span}\nTop channels: {top}"
+        )
+        keep = set(self.selected_channels())
+        self.channels.blockSignals(True)
+        self.channels.clear()
+        for ch in channels:
+            it = QListWidgetItem(ch)
+            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(
+                Qt.CheckState.Checked if (not keep or ch in keep) else Qt.CheckState.Unchecked
+            )
+            self.channels.addItem(it)
+        self.channels.blockSignals(False)
+
+    # ------------------------------------------------------------ purge ops
+
+    def _run_store_op(self, label: str, fn) -> None:
+        """Run fn(store, rag) -> result-message on a worker thread, then refresh."""
+        self._set_status(f"{label}…")
+
+        def worker() -> None:
+            try:
+                import os
+                from src.rag import RAGPipeline
+                store = self._store_conn()
+                rcfg = self._config["rag"]
+                rag = RAGPipeline(
+                    db_path=rcfg["db_path"],
+                    collection_name=rcfg["collection_name"],
+                    embedding_provider=rcfg["embedding_provider"],
+                    voyage_api_key=os.environ.get("VOYAGE_API_KEY") or None,
+                    top_k=rcfg["top_k"],
+                )
+                rag.connect()
+                msg = fn(store, rag)
+                self._sig.refreshed.emit(store.stats(), store.channels())
+                self._sig.status.emit(msg)
+            except Exception as exc:  # noqa: BLE001
+                self._sig.status.emit(f"{label} failed: {exc}")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _delete_older(self) -> None:
+        from PySide6.QtWidgets import QMessageBox
+        days = self.older_days.value()
+        if QMessageBox.question(
+            self, "Delete old events",
+            f"Delete every event older than {days} day(s) from both stores?",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+
+        def fn(store, rag) -> str:
+            from datetime import datetime, timedelta, timezone
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+            removed = store.expire_older_than(cutoff)
+            rag.delete_older_than(cutoff)
+            return f"Deleted {removed} event(s) older than {days}d."
+
+        self._run_store_op(f"Deleting events older than {days}d", fn)
+
+    def _purge_all(self) -> None:
+        from PySide6.QtWidgets import QMessageBox
+        if QMessageBox.warning(
+            self, "Purge everything",
+            "Delete ALL stored events and embeddings? This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+
+        def fn(store, rag) -> str:
+            removed = store.purge_all()
+            rag.purge_all()
+            return f"Purged everything ({removed} event(s) removed)."
+
+        self._run_store_op("Purging the knowledge base", fn)
 
 
 class PullPage(QWidget):

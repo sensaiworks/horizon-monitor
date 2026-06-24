@@ -44,6 +44,9 @@ class CaptureEngine:
         self.collect_enabled = True
         self.telegram_enabled = False
         self.watch_terms: list[str] = []
+        # Channels to record. Empty = collect everything (allow-all); otherwise only
+        # events whose channel is in this list are stored. Alerts ignore this filter.
+        self.collect_channels: list[str] = []
 
         # Presence-only Telegram pings (credentials from .env). Built up-front so the
         # Settings "Send test" button shares the same instance; never sends message bodies.
@@ -164,13 +167,19 @@ class CaptureEngine:
                     return
 
                 if self.collect_enabled:
-                    new = store.ingest(events)          # dedup gate
+                    wanted = events
+                    if self.collect_channels:
+                        allow = set(self.collect_channels)
+                        wanted = [e for e in events if (e.channel or "") in allow]
+                    new = store.ingest(wanted) if wanted else []
                     if new:
                         rag.ingest(new)                 # embed only the new ones
                         self.on_log(f"Collected +{len(new)} ({store.count()} total).")
                         for ev in new:
                             self.on_event(ev)
-                        self._fire_alerts(new)
+                    # Alerts ignore the collect-channel filter — a mention always pings,
+                    # even on a channel you chose not to record.
+                    self._fire_alerts(events)
                 else:
                     # Not collecting, but still alert on directed/keyword messages.
                     self._fire_alerts(events)

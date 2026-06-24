@@ -91,7 +91,7 @@ class MainWindow(QMainWindow):
 
         self._nav_buttons[0].setChecked(True)
         self._stack.setCurrentIndex(0)
-        self.log("Ready. Capture engine wiring lands in the next phase.")
+        self.log("Ready. Press Start to begin monitoring.")
 
     # --------------------------------------------------------------- header
 
@@ -181,7 +181,8 @@ class MainWindow(QMainWindow):
         # Order must match the non-separator entries in _NAV.
         self._monitor_page = MonitorPage()
         self._stack.addWidget(self._monitor_page)
-        self._stack.addWidget(CollectPage())
+        self._collect_page = CollectPage(self._config, self._api_key)
+        self._stack.addWidget(self._collect_page)
         self._stack.addWidget(PullPage())
         self._stack.addWidget(PushPage())
         self._stack.addWidget(AssistPage(self._config, self._api_key))
@@ -192,6 +193,9 @@ class MainWindow(QMainWindow):
         # Keep the running engine's alert settings in sync with the Monitor tab.
         self._monitor_page.enabled.toggled.connect(lambda _on: self._sync_engine_config())
         self._monitor_page.telegram.toggled.connect(lambda _on: self._sync_engine_config())
+        self._collect_page.record.toggled.connect(lambda _on: self._sync_engine_config())
+        self._collect_page.collect_all.toggled.connect(lambda _on: self._sync_engine_config())
+        self._collect_page.channels.itemChanged.connect(lambda _i: self._sync_engine_config())
 
     def _settings_page(self) -> QWidget:
         page = QWidget()
@@ -266,6 +270,12 @@ class MainWindow(QMainWindow):
         if name:
             terms.append(name)
         self._engine.watch_terms = terms
+
+        cp = self._collect_page
+        self._engine.collect_enabled = cp.record.isChecked()
+        self._engine.collect_channels = (
+            [] if cp.collect_all.isChecked() else cp.selected_channels()
+        )
 
     def _on_start(self) -> None:
         if self._engine_state == "paused" and self._engine is not None:

@@ -137,6 +137,25 @@ class EventStore:
         self._conn.commit()
         return cur.rowcount
 
+    def stats(self) -> dict:
+        """Summary for the Collect tab: total, capture span, and per-channel counts."""
+        if self._conn is None:
+            return {"total": 0, "first": None, "last": None, "channels": []}
+        total = self.count()
+        first, last = self._conn.execute(
+            "SELECT MIN(observed_at), MAX(observed_at) FROM events"
+        ).fetchone()
+        chans = self._conn.execute(
+            "SELECT CASE WHEN channel='' THEN '(unknown)' ELSE channel END AS ch, "
+            "COUNT(*) AS n FROM events GROUP BY ch ORDER BY n DESC"
+        ).fetchall()
+        return {
+            "total": total,
+            "first": first,
+            "last": last,
+            "channels": [(r[0], r[1]) for r in chans],
+        }
+
     def speakers(self) -> list[str]:
         assert self._conn is not None, "call connect() first"
         rows = self._conn.execute(
