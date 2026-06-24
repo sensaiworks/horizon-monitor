@@ -93,6 +93,10 @@ class RemoteController:
         w, h = Image.open(BytesIO(png)).size
         return w // 2, h // 2
 
+    async def screen_center(self) -> tuple[int, int]:
+        """Public centre of the remote surface (default scroll/click point)."""
+        return await self._remote_center()
+
     async def unlock(self, password: str, *, submit: bool = True) -> None:
         """Advance the remote lock screen to the logon prompt and TYPE the password.
 

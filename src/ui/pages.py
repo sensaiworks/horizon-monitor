@@ -436,25 +436,195 @@ class CollectPage(QWidget):
         self._run_store_op("Purging the knowledge base", fn)
 
 
+class _PullSignals(QObject):
+    status = Signal(str)
+    result = Signal(str, int)   # text, screens captured
+    error = Signal(str)
+
+
 class PullPage(QWidget):
-    def __init__(self) -> None:
+    """Read a file out of the remote VS Code into a local viewer.
+
+    Clipboard copy-OUT is blocked on this VDI (DLP), so the default channel is OCR:
+    open the file, then scroll + OCR page-by-page and stitch the captures. OCR is LOSSY
+    (confuses 1/l/I, drops indentation) — the result is flagged 'verify before trusting'.
+    An optional 'lossless clipboard' path is offered for VDIs where copy-out is allowed.
+
+    Drives the remote (scroll/type), so it's gated behind [control].enabled like Remote.
+    """
+
+    def __init__(self, config: dict, api_key: str = "") -> None:
         super().__init__()
+        self._config = config
+        self._control_enabled = bool(config.get("control", {}).get("enabled", False))
+        self._busy = False
+
+        self._sig = _PullSignals()
+        self._sig.status.connect(self._set_status)
+        self._sig.result.connect(self._on_result)
+        self._sig.error.connect(self._on_error)
+
         page, body = _page_scaffold(
             "Pull code",
-            "Bring a file (or a whole project) out of the remote VS Code so AI can read it.",
+            "Read a file out of the remote VS Code so local AI can work with it. Copy-out "
+            "is blocked here, so this OCRs the editor — lossy, so verify before trusting.",
         )
-        c1, l1 = _card("Pull a file")
-        l1.addWidget(_coming_soon(
-            "Open file → scroll + OCR page-by-page, stitched, with a progress bar."))
-        l1.addWidget(_coming_soon(
-            "Heads-up: clipboard copy-out is blocked on this VDI, so reads are OCR — "
-            "lossy. Pulled files get a ‘verify before trusting’ flag."))
-        body.addWidget(c1)
-        c2, l2 = _card("Pull the whole project")
-        l2.addWidget(_coming_soon("Get the file tree → checklist → pull each file in turn."))
-        body.addWidget(c2)
+
+        if not self._control_enabled:
+            warn, _ = _card(
+                "Remote control is off",
+                "Set [control].enabled = true in config.toml to pull from the remote.",
+            )
+            body.addWidget(warn)
+
+        # Pull controls
+        ctl_card, cl = _card(
+            "Pull a file",
+            "Give a path to open it in the remote VS Code first, or leave blank to read "
+            "what's already on screen. The view is read top-to-bottom.",
+        )
+        self.path = QLineEdit()
+        self.path.setPlaceholderText("src/app.py  — or blank to read the current screen")
+        cl.addWidget(self.path)
+
+        opt_row = QHBoxLayout()
+        opt_row.addWidget(QLabel("Max screens:"))
+        self.max_screens = QSpinBox()
+        self.max_screens.setRange(1, 60)
+        self.max_screens.setValue(12)
+        opt_row.addWidget(self.max_screens)
+        opt_row.addSpacing(16)
+        self.lossless = QCheckBox("Try lossless clipboard copy first")
+        self.lossless.setToolTip(
+            "Only works where Horizon clipboard copy-out is enabled; falls back to OCR."
+        )
+        opt_row.addWidget(self.lossless)
+        opt_row.addStretch(1)
+        cl.addLayout(opt_row)
+
+        self.btn_pull = QPushButton("Pull")
+        self.btn_pull.setObjectName("Primary")
+        self.btn_pull.clicked.connect(self._pull)
+        cl.addWidget(self.btn_pull, 0, Qt.AlignLeft)
+        self.status = QLabel("Ready." if self._control_enabled else "Disabled.")
+        self.status.setObjectName("Dim")
+        self.status.setWordWrap(True)
+        cl.addWidget(self.status)
+        body.addWidget(ctl_card)
+
+        # Result
+        res_card, rl = _card("Pulled text")
+        self.warn = QLabel("⚠ OCR is lossy — verify before trusting, especially code.")
+        self.warn.setObjectName("Dim")
+        self.warn.setWordWrap(True)
+        self.warn.setVisible(False)
+        rl.addWidget(self.warn)
+        self.out = QPlainTextEdit()
+        self.out.setReadOnly(True)
+        self.out.setFont(QFont("Consolas", 10))
+        self.out.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.out.setMinimumHeight(220)
+        rl.addWidget(self.out)
+        self.btn_save = QPushButton("Save to file…")
+        self.btn_save.setEnabled(False)
+        self.btn_save.clicked.connect(self._save)
+        rl.addWidget(self.btn_save, 0, Qt.AlignLeft)
+        body.addWidget(res_card, 1)
+
         body.addStretch(1)
         QVBoxLayout(self).addWidget(page)
+
+        if not self._control_enabled:
+            self.btn_pull.setEnabled(False)
+            self.path.setEnabled(False)
+
+    def _set_status(self, text: str) -> None:
+        self.status.setText(text)
+
+    def _controller(self, client):
+        ctl = self._config.get("control", {})
+        from src.controller import RemoteController
+        return RemoteController(
+            client,
+            focus_target=ctl.get("focus_target", "PVDI"),
+            launch_wait=ctl.get("launch_wait_seconds", 1.5),
+            clipboard_sync=ctl.get("clipboard_sync_seconds", 0.6),
+            copy_timeout=ctl.get("copy_timeout_seconds", 6.0),
+            screen=ctl.get("screen", 0),
+        )
+
+    def _pull(self) -> None:
+        if self._busy or not self._control_enabled:
+            return
+        path = self.path.text().strip()
+        max_screens = self.max_screens.value()
+        lossless = self.lossless.isChecked()
+        self._busy = True
+        self.btn_pull.setEnabled(False)
+        self.btn_save.setEnabled(False)
+        threading.Thread(
+            target=self._run, args=(path, max_screens, lossless), daemon=True
+        ).start()
+
+    def _run(self, path: str, max_screens: int, lossless: bool) -> None:
+        async def go() -> tuple[str, int]:
+            from src.mcp_client import HorizonMCPClient
+            cfg = self._config
+            async with HorizonMCPClient(
+                cfg["mcp"]["server_path"], cfg["mcp"]["command"]
+            ) as client:
+                c = self._controller(client)
+                if path:
+                    self._sig.status.emit(f"Opening {path} in the remote…")
+                    await c.open_file(path)
+                # Lossless clipboard copy first (works only if copy-out is enabled).
+                if lossless:
+                    self._sig.status.emit("Trying lossless clipboard copy…")
+                    try:
+                        return await c.copy_from_remote(), 0
+                    except Exception as exc:  # noqa: BLE001 — fall back to OCR
+                        self._sig.status.emit(f"Clipboard copy unavailable ({exc}); OCR…")
+                self._sig.status.emit("Reading the screen via OCR (scroll-stitching)…")
+                sx, sy = await c.screen_center()
+                return await c.read_scrolling(sx, sy, max_screens=max_screens)
+
+        try:
+            import asyncio
+            text, screens = asyncio.run(go())
+            self._sig.result.emit(text, screens)
+        except Exception as exc:  # noqa: BLE001
+            self._sig.error.emit(str(exc))
+
+    def _on_result(self, text: str, screens: int) -> None:
+        self._busy = False
+        self.btn_pull.setEnabled(True)
+        self.out.setPlainText(text)
+        ocr = screens > 0
+        self.warn.setVisible(ocr)
+        self.btn_save.setEnabled(bool(text))
+        how = f"OCR · {screens} screen(s)" if ocr else "lossless clipboard"
+        self._set_status(f"Pulled {len(text)} chars ({how}).")
+
+    def _on_error(self, msg: str) -> None:
+        self._busy = False
+        self.btn_pull.setEnabled(True)
+        self._set_status(f"Pull failed: {msg}")
+
+    def _save(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+        text = self.out.toPlainText()
+        if not text:
+            return
+        suggested = (self.path.text().strip().split("/")[-1] or "pulled.txt")
+        fname, _ = QFileDialog.getSaveFileName(self, "Save pulled text", suggested)
+        if not fname:
+            return
+        try:
+            with open(fname, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            self._set_status(f"Saved {len(text)} chars → {fname}")
+        except Exception as exc:  # noqa: BLE001
+            self._set_status(f"Save failed: {exc}")
 
 
 class PushPage(QWidget):

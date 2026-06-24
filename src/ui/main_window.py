@@ -183,7 +183,7 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(self._monitor_page)
         self._collect_page = CollectPage(self._config, self._api_key)
         self._stack.addWidget(self._collect_page)
-        self._stack.addWidget(PullPage())
+        self._stack.addWidget(PullPage(self._config, self._api_key))
         self._stack.addWidget(PushPage())
         self._stack.addWidget(AssistPage(self._config, self._api_key))
         self._stack.addWidget(RemotePage(self._config, self._api_key))
