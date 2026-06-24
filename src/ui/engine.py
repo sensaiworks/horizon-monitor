@@ -42,7 +42,17 @@ class CaptureEngine:
         # Sink toggles + alert config (the UI flips these live).
         self.alert_enabled = True
         self.collect_enabled = True
+        self.telegram_enabled = False
         self.watch_terms: list[str] = []
+
+        # Presence-only Telegram pings (credentials from .env). Built up-front so the
+        # Settings "Send test" button shares the same instance; never sends message bodies.
+        from ..telegram import TelegramNotifier
+        self.telegram = TelegramNotifier(
+            os.environ.get("TELEGRAM_BOT_TOKEN", ""),
+            os.environ.get("TELEGRAM_CHAT_ID", ""),
+        )
+        self.telegram.on_error = lambda msg: self.on_log(f"Telegram failed: {msg}")
 
         self._state = "stopped"
         self._thread: threading.Thread | None = None
@@ -191,3 +201,5 @@ class CaptureEngine:
             )
             if hit:
                 self.on_alert(ev)
+                if self.telegram_enabled:
+                    self.telegram.notify_presence(ev.speaker, ev.channel)

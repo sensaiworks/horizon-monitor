@@ -153,8 +153,8 @@ class MonitorPage(QWidget):
         self.telegram = QCheckBox("Ping my phone via Telegram")
         cfg_btn = QPushButton("Configure…")
         cfg_btn.setMaximumWidth(110)
-        cfg_btn.setEnabled(False)
-        cfg_btn.setToolTip("Telegram bot setup arrives with the alert engine (next phase).")
+        cfg_btn.setToolTip("Set up the bot token / chat id and send a test ping.")
+        cfg_btn.clicked.connect(self._configure_telegram)
         tg_row.addWidget(self.telegram)
         tg_row.addStretch(1)
         tg_row.addWidget(cfg_btn)
@@ -197,6 +197,37 @@ class MonitorPage(QWidget):
         except Exception:
             from PySide6.QtWidgets import QApplication
             QApplication.beep()
+
+    def _configure_telegram(self) -> None:
+        from PySide6.QtWidgets import QMessageBox
+        from src.telegram import TelegramNotifier
+
+        tn = TelegramNotifier(
+            os.environ.get("TELEGRAM_BOT_TOKEN", ""),
+            os.environ.get("TELEGRAM_CHAT_ID", ""),
+        )
+        if not tn.configured:
+            QMessageBox.information(
+                self,
+                "Telegram presence alerts",
+                "Pings your phone with only '🔔 <Name> mentioned you' — never the message "
+                "body.\n\nTo enable:\n"
+                "1. In Telegram, message @BotFather → /newbot → copy the token.\n"
+                "2. Message your new bot once, then open\n"
+                "   https://api.telegram.org/bot<token>/getUpdates and copy your chat id.\n"
+                "3. Add to .env:\n"
+                "     TELEGRAM_BOT_TOKEN=...\n"
+                "     TELEGRAM_CHAT_ID=...\n"
+                "4. Restart the app, then Configure → Send test.",
+            )
+            return
+        if QMessageBox.question(
+            self, "Telegram", "Credentials found. Send a test ping now?"
+        ) == QMessageBox.StandardButton.Yes:
+            ok, detail = tn.send_test()
+            (QMessageBox.information if ok else QMessageBox.warning)(
+                self, "Telegram test", detail
+            )
 
 
 # ----------------------------------------------------------------- preview tabs

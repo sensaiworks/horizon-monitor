@@ -191,6 +191,7 @@ class MainWindow(QMainWindow):
 
         # Keep the running engine's alert settings in sync with the Monitor tab.
         self._monitor_page.enabled.toggled.connect(lambda _on: self._sync_engine_config())
+        self._monitor_page.telegram.toggled.connect(lambda _on: self._sync_engine_config())
 
     def _settings_page(self) -> QWidget:
         page = QWidget()
@@ -259,6 +260,7 @@ class MainWindow(QMainWindow):
             return
         mp = self._monitor_page
         self._engine.alert_enabled = mp.enabled.isChecked()
+        self._engine.telegram_enabled = mp.telegram.isChecked()
         terms = [mp.terms.item(i).text() for i in range(mp.terms.count())]
         name = self._config.get("user", {}).get("display_name", "")
         if name:
