@@ -453,11 +453,14 @@ class PullPage(QWidget):
     Drives the remote (scroll/type), so it's gated behind [control].enabled like Remote.
     """
 
-    def __init__(self, config: dict, api_key: str = "") -> None:
+    def __init__(self, config: dict, api_key: str = "", pulled: dict | None = None) -> None:
         super().__init__()
         self._config = config
         self._control_enabled = bool(config.get("control", {}).get("enabled", False))
         self._busy = False
+        # Shared {remote_path: pulled_text} so the Push tab can diff against what was pulled.
+        self._pulled = pulled if pulled is not None else {}
+        self._pull_path = ""
 
         self._sig = _PullSignals()
         self._sig.status.connect(self._set_status)
@@ -557,6 +560,7 @@ class PullPage(QWidget):
         if self._busy or not self._control_enabled:
             return
         path = self.path.text().strip()
+        self._pull_path = path
         max_screens = self.max_screens.value()
         lossless = self.lossless.isChecked()
         self._busy = True
@@ -602,6 +606,8 @@ class PullPage(QWidget):
         ocr = screens > 0
         self.warn.setVisible(ocr)
         self.btn_save.setEnabled(bool(text))
+        if self._pull_path and text:
+            self._pulled[self._pull_path] = text   # baseline for the Push tab's diff
         how = f"OCR · {screens} screen(s)" if ocr else "lossless clipboard"
         self._set_status(f"Pulled {len(text)} chars ({how}).")
 
@@ -627,25 +633,229 @@ class PullPage(QWidget):
             self._set_status(f"Save failed: {exc}")
 
 
+class _PushSignals(QObject):
+    status = Signal(str)
+    done = Signal(str)     # success message
+    error = Signal(str)
+
+
 class PushPage(QWidget):
-    def __init__(self) -> None:
+    """Write a local/edited file back into the remote VS Code.
+
+    The reliable write channel is paste (type_text fights autocomplete/auto-indent):
+    open the target, select-all, paste the whole document, optionally save. Before any
+    write you see a unified diff vs the last pulled version of that file and must Confirm,
+    so a real file is never silently clobbered. Gated behind [control].enabled.
+    """
+
+    def __init__(self, config: dict, api_key: str = "", pulled: dict | None = None) -> None:
         super().__init__()
+        self._config = config
+        self._control_enabled = bool(config.get("control", {}).get("enabled", False))
+        self._pulled = pulled if pulled is not None else {}
+        self._busy = False
+
+        self._sig = _PushSignals()
+        self._sig.status.connect(self._set_status)
+        self._sig.done.connect(self._on_done)
+        self._sig.error.connect(self._on_error)
+
         page, body = _page_scaffold(
             "Push code",
-            "Send new or AI-edited files back into the remote VS Code project.",
+            "Send a new or AI-edited file back into the remote VS Code. You review a diff "
+            "and confirm before anything is overwritten.",
         )
-        c1, l1 = _card("Push a file")
-        l1.addWidget(_coming_soon(
-            "Open target → paste whole document (the reliable write channel)."))
-        l1.addWidget(_coming_soon(
-            "Shows a diff vs the last pulled version + an explicit Confirm before every "
-            "write, so a real file is never silently clobbered."))
-        body.addWidget(c1)
-        c2, l2 = _card("Push multiple files")
-        l2.addWidget(_coming_soon("Batch new/updated files; new files created via Ctrl+N → paste → save."))
-        body.addWidget(c2)
+
+        if not self._control_enabled:
+            warn, _ = _card(
+                "Remote control is off",
+                "Set [control].enabled = true in config.toml to push to the remote.",
+            )
+            body.addWidget(warn)
+
+        # What to push
+        src_card, sl = _card(
+            "What to push",
+            "Load a local file or paste/type the content below — this exact text replaces "
+            "the remote document.",
+        )
+        load_row = QHBoxLayout()
+        self.local_path = QLineEdit()
+        self.local_path.setPlaceholderText("local file to load (optional)…")
+        load_btn = QPushButton("Load…")
+        load_btn.clicked.connect(self._load)
+        load_row.addWidget(self.local_path, 1)
+        load_row.addWidget(load_btn)
+        sl.addLayout(load_row)
+        self.editor = QPlainTextEdit()
+        self.editor.setFont(QFont("Consolas", 10))
+        self.editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.editor.setMinimumHeight(150)
+        self.editor.setPlaceholderText("Content to push…")
+        sl.addWidget(self.editor)
+        body.addWidget(src_card)
+
+        # Where to push
+        dst_card, dl = _card(
+            "Where to push",
+            "Remote path to open before pasting (blank = paste into the current editor).",
+        )
+        self.remote_path = QLineEdit()
+        self.remote_path.setPlaceholderText("src/app.py")
+        dl.addWidget(self.remote_path)
+        self.save_after = QCheckBox("Save after paste (Ctrl+S)")
+        self.save_after.setChecked(True)
+        dl.addWidget(self.save_after)
+        body.addWidget(dst_card)
+
+        # Diff + push
+        act_card, al = _card("Review & push")
+        btn_row = QHBoxLayout()
+        self.btn_diff = QPushButton("Preview diff")
+        self.btn_diff.clicked.connect(self._preview_diff)
+        self.btn_push = QPushButton("Push to remote")
+        self.btn_push.setObjectName("Primary")
+        self.btn_push.clicked.connect(self._push)
+        btn_row.addWidget(self.btn_diff)
+        btn_row.addWidget(self.btn_push)
+        btn_row.addStretch(1)
+        al.addLayout(btn_row)
+        self.diff = QPlainTextEdit()
+        self.diff.setReadOnly(True)
+        self.diff.setFont(QFont("Consolas", 10))
+        self.diff.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.diff.setMinimumHeight(150)
+        al.addWidget(self.diff)
+        self.status = QLabel("Ready." if self._control_enabled else "Disabled.")
+        self.status.setObjectName("Dim")
+        self.status.setWordWrap(True)
+        al.addWidget(self.status)
+        body.addWidget(act_card, 1)
+
         body.addStretch(1)
         QVBoxLayout(self).addWidget(page)
+
+        if not self._control_enabled:
+            self.btn_push.setEnabled(False)
+
+    def _set_status(self, text: str) -> None:
+        self.status.setText(text)
+
+    def _load(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+        fname, _ = QFileDialog.getOpenFileName(self, "Load file to push")
+        if not fname:
+            return
+        try:
+            with open(fname, encoding="utf-8") as fh:
+                self.editor.setPlainText(fh.read())
+            self.local_path.setText(fname)
+            if not self.remote_path.text().strip():
+                self.remote_path.setText(fname.replace("\\", "/").split("/")[-1])
+            self._set_status(f"Loaded {fname}.")
+        except Exception as exc:  # noqa: BLE001
+            self._set_status(f"Load failed: {exc}")
+
+    def _baseline(self) -> tuple[str, bool]:
+        """Last-pulled text for the remote path, and whether one was found."""
+        key = self.remote_path.text().strip()
+        if key in self._pulled:
+            return self._pulled[key], True
+        return "", False
+
+    def _diff_lines(self) -> tuple[list[str], int, int, bool]:
+        import difflib
+        base, found = self._baseline()
+        new = self.editor.toPlainText()
+        a = base.splitlines()
+        b = new.splitlines()
+        diff = list(difflib.unified_diff(a, b, "pulled", "to push", lineterm=""))
+        added = sum(1 for d in diff if d.startswith("+") and not d.startswith("+++"))
+        removed = sum(1 for d in diff if d.startswith("-") and not d.startswith("---"))
+        return diff, added, removed, found
+
+    def _preview_diff(self) -> None:
+        diff, added, removed, found = self._diff_lines()
+        if not self.editor.toPlainText():
+            self._set_status("Nothing to push — the content is empty.")
+            return
+        base_note = "vs last pulled" if found else "no pulled baseline — all new"
+        self.diff.setPlainText(
+            "\n".join(diff) if diff else "(identical to the pulled version)"
+        )
+        self._set_status(f"+{added} / -{removed} lines ({base_note}).")
+
+    def _push(self) -> None:
+        from PySide6.QtWidgets import QMessageBox
+        if self._busy or not self._control_enabled:
+            return
+        text = self.editor.toPlainText()
+        if not text:
+            self._set_status("Nothing to push — the content is empty.")
+            return
+        target = self.remote_path.text().strip()
+        save = self.save_after.isChecked()
+        _diff, added, removed, found = self._diff_lines()
+        where = f"open '{target}' then " if target else "the current remote editor — "
+        base_note = "" if found else "  (no pulled baseline to compare against)"
+        if QMessageBox.warning(
+            self, "Confirm push",
+            f"{where}select-all and paste {len(text)} chars"
+            f"{' then save' if save else ''}.\n\n"
+            f"Changes vs pulled: +{added} / -{removed} lines.{base_note}\n\n"
+            "This overwrites the remote document. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+
+        self._busy = True
+        self.btn_push.setEnabled(False)
+        threading.Thread(
+            target=self._run, args=(text, target, save), daemon=True
+        ).start()
+
+    def _run(self, text: str, target: str, save: bool) -> None:
+        async def go() -> None:
+            from src.mcp_client import HorizonMCPClient
+            from src.controller import RemoteController
+            cfg = self._config
+            ctl = cfg.get("control", {})
+            async with HorizonMCPClient(
+                cfg["mcp"]["server_path"], cfg["mcp"]["command"]
+            ) as client:
+                c = RemoteController(
+                    client,
+                    focus_target=ctl.get("focus_target", "PVDI"),
+                    launch_wait=ctl.get("launch_wait_seconds", 1.5),
+                    clipboard_sync=ctl.get("clipboard_sync_seconds", 0.6),
+                    copy_timeout=ctl.get("copy_timeout_seconds", 6.0),
+                    screen=ctl.get("screen", 0),
+                )
+                if target:
+                    self._sig.status.emit(f"Opening {target} in the remote…")
+                    await c.open_file(target)
+                self._sig.status.emit("Pasting the document into the remote…")
+                await c.paste_to_remote(text, replace_all=True, save=save)
+
+        try:
+            import asyncio
+            asyncio.run(go())
+            self._sig.done.emit(
+                f"Pushed {len(text)} chars{' and saved' if save else ''}."
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._sig.error.emit(str(exc))
+
+    def _on_done(self, msg: str) -> None:
+        self._busy = False
+        self.btn_push.setEnabled(True)
+        self._set_status(msg)
+
+    def _on_error(self, msg: str) -> None:
+        self._busy = False
+        self.btn_push.setEnabled(True)
+        self._set_status(f"Push failed: {msg}")
 
 
 # --------------------------------------------------------------------- Ask tab
