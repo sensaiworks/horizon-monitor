@@ -75,6 +75,10 @@ class TrayApp:
         self._pause_ev: asyncio.Event | None = None
         self._icon: pystray.Icon | None = None
 
+        # Keep-awake (anti-idle) worker — nudges the remote so it never locks.
+        self._keepalive_thread: threading.Thread | None = None
+        self._keepalive_stop: threading.Event | None = None
+
     # ------------------------------------------------------------------ menu
 
     def _menu_items(self):
@@ -137,10 +141,14 @@ class TrayApp:
 
         # Remote-control actions — only when explicitly enabled in config.
         if self._control_enabled:
+            keepalive_label = (
+                "✓ Keep remote awake" if self._keepalive_thread else "Keep remote awake"
+            )
             items += [
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Launch / activate app on remote…", self._on_launch_app),
                 pystray.MenuItem("Bring Horizon to front", self._on_bring_to_front),
+                pystray.MenuItem(keepalive_label, self._on_toggle_keepalive),
             ]
 
         items += [
@@ -399,6 +407,7 @@ class TrayApp:
             client,
             focus_target=ctl.get("focus_target", "PVDI"),
             launch_wait=ctl.get("launch_wait_seconds", 1.5),
+            screen=ctl.get("screen", 0),
         )
 
     def _run_control(self, label, action) -> None:
@@ -430,6 +439,47 @@ class TrayApp:
             print("HORIZON_PASSWORD not set in .env — cannot unlock", flush=True)
             return
         self._run_control("unlock remote desktop", lambda c: c.unlock(password))
+
+    def _on_toggle_keepalive(self, icon=None, item=None) -> None:
+        if not self._control_enabled:
+            print("Remote control disabled — set [control].enabled=true", flush=True)
+            return
+        if self._keepalive_thread:          # currently running -> stop it
+            if self._keepalive_stop:
+                self._keepalive_stop.set()
+            self._keepalive_thread = None
+            print("Keep-awake: off", flush=True)
+        else:                               # start it
+            self._keepalive_stop = threading.Event()
+            self._keepalive_thread = threading.Thread(
+                target=self._keepalive_worker, args=(self._keepalive_stop,), daemon=True
+            )
+            self._keepalive_thread.start()
+            print("Keep-awake: on", flush=True)
+        self._refresh()
+
+    def _keepalive_worker(self, stop: threading.Event) -> None:
+        """Hold one MCP connection and nudge the remote until `stop` is set."""
+        ctl = self._config.get("control", {})
+        secs = float(ctl.get("keepalive_interval_seconds", 120.0))
+
+        async def go() -> None:
+            cfg = self._config
+            async with HorizonMCPClient(
+                cfg["mcp"]["server_path"], cfg["mcp"]["command"]
+            ) as client:
+                c = self._controller(client)
+                while not stop.is_set():
+                    try:
+                        await c.nudge()
+                    except Exception as exc:
+                        print(f"Keep-awake nudge failed: {exc}", flush=True)
+                    stop.wait(secs)
+
+        try:
+            asyncio.run(go())
+        except Exception as exc:
+            print(f"Keep-awake stopped: {exc}", flush=True)
 
     # -------------------------------------------------------------- entry
 

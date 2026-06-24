@@ -146,11 +146,20 @@ async def _run_monitor(config: dict, dry_run: bool) -> None:
 
 @cli.command()
 def tray():
-    """Launch system tray icon with Start/Pause/Stop controls (production mode)."""
+    """Launch the classic pystray menu icon (legacy; prefer `app`)."""
     config = load_config()
     api_key = require_api_key()
     from src.tray import TrayApp
     TrayApp(config, api_key).run()
+
+
+@cli.command()
+def app():
+    """Launch the desktop app: tray icon + tabbed window (PySide6)."""
+    config = load_config()
+    api_key = require_api_key()
+    from src.ui import run
+    raise SystemExit(run(config, api_key))
 
 
 def _parse_coords(s: str, n: int, what: str) -> tuple[int, ...]:
@@ -169,7 +178,7 @@ def _parse_coords(s: str, n: int, what: str) -> tuple[int, ...]:
     "action",
     type=click.Choice(
         [
-            "unlock", "launch", "activate", "run", "foreground", "reply",
+            "unlock", "keep-alive", "launch", "activate", "run", "foreground", "reply",
             "read-file", "write-file", "open",
             "read-screen", "read-scroll", "paste",
         ]
@@ -198,13 +207,25 @@ def _parse_coords(s: str, n: int, what: str) -> tuple[int, ...]:
     "--double", is_flag=True,
     help="paste: double-click the --at point (some apps need two clicks to focus)",
 )
-def remote(action: str, value: str, out: str, save: bool, region: str, at: str, double: bool):
+@click.option(
+    "--interval", type=float, default=None,
+    help="keep-alive: seconds between nudges (default [control].keepalive_interval_seconds)",
+)
+@click.option(
+    "--submit/--no-submit", default=True,
+    help="unlock: press Enter after typing the password (--no-submit lets you verify "
+         "the typed password before pressing Enter — avoids burning a login attempt)",
+)
+def remote(action: str, value: str, out: str, save: bool, region: str, at: str,
+           double: bool, interval: float, submit: bool):
     """Drive the remote Horizon session (WRITE/READ actions; requires [control].enabled).
 
     Examples:
       python main.py remote foreground
       python main.py remote launch "Microsoft Teams"
-      python main.py remote unlock
+      python main.py remote unlock                 # type the password and sign in
+      python main.py remote unlock --no-submit     # type it but stop before Enter
+      python main.py remote keep-alive             # nudge until Ctrl+C so it won't lock
       python main.py remote reply "on it, thanks"
 
     OCR read bridge (for VDIs that block clipboard copy-out — reads via screenshot+OCR):
@@ -223,12 +244,15 @@ def remote(action: str, value: str, out: str, save: bool, region: str, at: str, 
         raise click.ClickException(
             "Remote control disabled — set [control].enabled = true in config.toml"
         )
-    asyncio.run(_run_remote(config, action, value, out, save, region, at, double))
+    asyncio.run(
+        _run_remote(config, action, value, out, save, region, at, double, interval, submit)
+    )
 
 
 async def _run_remote(
     config: dict, action: str, value: str, out: str, save: bool,
     region: str = "", at: str = "", double: bool = False,
+    interval: float | None = None, submit: bool = True,
 ) -> None:
     from src.mcp_client import HorizonMCPClient
     from src.controller import RemoteController
@@ -253,6 +277,7 @@ async def _run_remote(
             launch_wait=ctl.get("launch_wait_seconds", 1.5),
             clipboard_sync=ctl.get("clipboard_sync_seconds", 0.6),
             copy_timeout=ctl.get("copy_timeout_seconds", 6.0),
+            screen=ctl.get("screen", 0),
         )
         print(f"remote: {action} {value!r}", flush=True)
         if action == "foreground":
@@ -261,7 +286,21 @@ async def _run_remote(
             password = os.environ.get("HORIZON_PASSWORD", "")
             if not password:
                 raise click.ClickException("HORIZON_PASSWORD not set in .env")
-            await c.unlock(password)
+            await c.unlock(password, submit=submit)
+        elif action == "keep-alive":
+            secs = interval if interval is not None else ctl.get(
+                "keepalive_interval_seconds", 120.0
+            )
+            print(
+                f"remote: keep-alive every {secs:g}s — Ctrl+C to stop", flush=True
+            )
+            try:
+                while True:
+                    await c.nudge()
+                    await asyncio.sleep(secs)
+            except (KeyboardInterrupt, asyncio.CancelledError):
+                print("remote: keep-alive stopped", flush=True)
+                return
         elif action in ("launch", "activate"):
             if not value:
                 raise click.ClickException(f"'{action}' needs an app name")
@@ -314,6 +353,43 @@ async def _run_remote(
                 flush=True,
             )
         print("remote: done", flush=True)
+
+
+@cli.command()
+@click.argument("goal")
+@click.option("--act", is_flag=True, help="Hands-on mode: perform actions (confirming each). "
+                                          "Default is read-only advice.")
+def assist(goal: str, act: bool):
+    """Direct help — a screen-aware agent drives the remote VDI to do a task.
+
+    \b
+    python main.py assist "help me switch to master, do not stash my changes"
+    python main.py assist "open the integration test file in VS Code" --act
+
+    Advise (default) is read-only — it only tells you the steps. --act performs them,
+    asking you to confirm every input action (y = do it, s = skip, n = stop).
+    """
+    config = load_config()
+    api_key = require_api_key()
+    from src.assistant import ComputerUseAgent
+
+    agent = ComputerUseAgent(config, api_key)
+
+    def confirm(desc: str) -> None:
+        ans = input(f"\n  ACT — perform this? [{desc}]\n  (y)es / (s)kip / (n)o-stop: ").strip().lower()
+        decision = {"y": "confirm", "yes": "confirm", "s": "skip", "skip": "skip"}.get(ans, "stop")
+        agent.resolve_confirmation(decision)
+
+    agent.on_text = lambda s: print(f"\nAssistant: {s}", flush=True)
+    agent.on_action = confirm
+    agent.on_result = lambda s: print(f"  · {s}", flush=True)
+    agent.on_status = lambda s: print(f"  [{s}]", flush=True)
+    agent.on_error = lambda e: print(f"  ERROR: {e}", flush=True)
+
+    mode = "act" if act else "advise"
+    print(f"assist ({mode}): {goal!r}\n", flush=True)
+    agent.run_turn(goal, mode)
+    print("\nassist: done", flush=True)
 
 
 @cli.command()

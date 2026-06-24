@@ -102,13 +102,24 @@ class HorizonMCPClient:
     # desktop only when the local Horizon client window has OS focus — callers
     # (see RemoteController) focus it first.
 
-    async def click(self, x: int, y: int, button: str = "left") -> str:
-        """Click at a pixel coordinate."""
-        return self._first_text(await self._call("click", x=x, y=y, button=button))
+    async def click(
+        self, x: int, y: int, button: str = "left", screen: int | None = None
+    ) -> str:
+        """Click at a pixel coordinate.
 
-    async def double_click(self, x: int, y: int) -> str:
-        """Double-click at a pixel coordinate."""
-        return self._first_text(await self._call("double_click", x=x, y=y))
+        Pass `screen` (a `list_monitors` index) to treat x,y as 0-based from that
+        monitor's top-left — the same frame a `screenshot(screen=N)` is in — so image
+        coordinates map directly without virtual-desktop offsets.
+        """
+        return self._first_text(
+            await self._call("click", x=x, y=y, button=button, screen=screen)
+        )
+
+    async def double_click(self, x: int, y: int, screen: int | None = None) -> str:
+        """Double-click at a pixel coordinate (see click() for `screen`)."""
+        return self._first_text(
+            await self._call("double_click", x=x, y=y, screen=screen)
+        )
 
     async def move_mouse(self, x: int, y: int) -> str:
         """Move the cursor without clicking (hover)."""
@@ -139,10 +150,23 @@ class HorizonMCPClient:
         """Write text to the clipboard (pass '' to clear a staged secret)."""
         return self._first_text(await self._call("set_clipboard", text=text))
 
-    async def scroll(self, x: int, y: int, direction: str, amount: int | None = None) -> str:
-        """Scroll the mouse wheel at (x, y). direction is 'up' or 'down'."""
+    async def scroll(
+        self,
+        x: int,
+        y: int,
+        direction: str,
+        amount: int | None = None,
+        screen: int | None = None,
+    ) -> str:
+        """Scroll the mouse wheel at (x, y). direction is 'up' or 'down'.
+
+        Pass `screen` (a `list_monitors` index) so x,y are read relative to that
+        monitor's top-left, matching the frame a screenshot(screen=N) was taken in.
+        """
         return self._first_text(
-            await self._call("scroll", x=x, y=y, direction=direction, amount=amount)
+            await self._call(
+                "scroll", x=x, y=y, direction=direction, amount=amount, screen=screen
+            )
         )
 
     async def get_foreground_window(self) -> str:

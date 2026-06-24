@@ -61,10 +61,14 @@ class RemoteController:
         launch_wait: float = 1.5,
         clipboard_sync: float = 0.6,
         copy_timeout: float = 6.0,
+        screen: int = 0,
     ) -> None:
         self._client = client
         self._focus_target = focus_target
         self._launch_wait = launch_wait
+        # Which monitor the remote surface is on (a list_monitors index). Used to
+        # click the remote at the right place for the unlock CAD step.
+        self._screen = screen
         # How long redirection takes to sync the clipboard between local and remote,
         # and how long to wait for a copied file to arrive before giving up.
         self._clipboard_sync = clipboard_sync
@@ -79,31 +83,58 @@ class RemoteController:
     async def bring_to_front(self) -> None:
         await self.ensure_foreground()
 
-    async def unlock(self, password: str) -> None:
-        """Send Ctrl+Alt+Del to the remote, then enter the password.
+    async def _remote_center(self) -> tuple[int, int]:
+        """Centre of the remote surface, in the same coord frame as click(screen=)."""
+        from io import BytesIO
 
-        Uses paste_text (more reliable than typing in a remote password field) and
-        restores the prior clipboard afterward so the secret does not linger there.
+        from PIL import Image
+
+        png = await self._client.screenshot(screen=self._screen)
+        w, h = Image.open(BytesIO(png)).size
+        return w // 2, h // 2
+
+    async def unlock(self, password: str, *, submit: bool = True) -> None:
+        """Advance the remote lock screen to the logon prompt and TYPE the password.
+
+        The sequence is exactly what field-testing this VDI proved out:
+          1. focus the local Horizon client (ensure_foreground)
+          2. CLICK the remote surface — Ctrl+Alt+Del is ignored until the remote
+             actually holds input focus
+          3. Ctrl+Alt+Insert (Horizon's Ctrl+Alt+Del) -> the Windows logon prompt
+          4. TYPE the password — the secure logon field REJECTS clipboard paste, and
+             this VDI forwards keys by scan code (horizon-mcp type_text now sends real
+             scan codes), so typing is the only channel that lands. Nothing touches
+             the clipboard, so the secret never lingers there.
+          5. optionally press Enter (submit).
+
+        An empty password is never submitted — a blank/failed entry burns a login
+        attempt and risks account lockout.
         """
         await self.ensure_foreground()
+        cx, cy = await self._remote_center()
+        await self._client.click(cx, cy, screen=self._screen)   # give the remote input focus
+        await asyncio.sleep(0.4)
         await self._client.key_combo(["Ctrl", "Alt", "Insert"])  # Horizon's Ctrl+Alt+Del
         await asyncio.sleep(2.5)                                 # wait for the login prompt
-        if password:
-            prior = ""
-            try:
-                prior = await self._client.get_clipboard()
-            except Exception:
-                pass
-            try:
-                await self._client.paste_text(password)
-                await asyncio.sleep(0.3)
-                await self._client.key_combo(["Enter"])
-            finally:
-                # Clear/restore the clipboard so the password does not persist.
-                try:
-                    await self._client.set_clipboard(prior or "")
-                except Exception:
-                    pass
+        if not password:
+            return
+        await self._client.type_text(password)
+        if submit:
+            await asyncio.sleep(0.3)
+            await self._client.key_combo(["Enter"])
+
+    async def nudge(self) -> None:
+        """Anti-idle keep-alive: focus the remote and jiggle the cursor one pixel.
+
+        Any input resets the session's idle timer; a 1px mouse move changes nothing
+        on screen, clicks nothing, and types nothing — the safest possible nudge.
+        Sending input requires the Horizon client to be foreground, so this briefly
+        steals local focus — intended for when the user has stepped away.
+        """
+        await self.ensure_foreground()
+        await self._client.move_mouse(120, 120)
+        await asyncio.sleep(0.1)
+        await self._client.move_mouse(121, 120)
 
     async def open_start(self) -> None:
         await self.ensure_foreground()

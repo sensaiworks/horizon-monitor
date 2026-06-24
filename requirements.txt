@@ -14,4 +14,7 @@ sentence-transformers>=3.0.0  # offline fallback
 
 # CLI + tray
 click>=8.1.0
-pystray>=0.19.0
+pystray>=0.19.0           # legacy `tray` command only
+
+# Desktop UI (`app` command): tray + tabbed window. The cp310-abi3 wheel runs on 3.10–3.14.
+PySide6>=6.8.0

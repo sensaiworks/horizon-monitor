@@ -43,10 +43,27 @@ retain_days = 0
 # focus, so they are off by default and only ever run when YOU trigger them.
 enabled            = false
 focus_target       = "PVDI"     # local Horizon window to focus before sending input
+screen             = 0          # which monitor the remote surface is on (list_monitors index)
 launch_wait_seconds = 1.5       # pause after Start-search / Enter for the remote to react
+# keep-alive: `remote keep-alive` nudges the cursor 1px this often so the session never
+# idles into a lock. Keep it well under the VDI's lock timeout. Steals local focus each
+# tick (input needs the Horizon window foreground) — use it when you've stepped away.
+keepalive_interval_seconds = 120
 # Code-editing bridge (read-file/write-file): pull a file out of the remote editor,
 # edit it locally, paste the whole document back. Relies on Horizon clipboard
 # redirection being enabled (it usually is); read-file reports clearly if it isn't.
 clipboard_sync_seconds = 0.6    # time for the clipboard to sync local <-> remote
 copy_timeout_seconds   = 6.0    # give up waiting for a copied file to arrive after this
 # HORIZON_PASSWORD (in .env) is used only by the unlock action.
+
+[assist]
+# Direct-help agent (Assist tab / `python main.py assist`): a screen-aware computer-use
+# loop that drives the remote VDI to accomplish a goal you describe in plain language.
+# ADVISE mode is read-only — it only suggests the steps. ACT mode performs them, but
+# confirms every single input action (click / type / key / scroll) before it runs.
+model         = "claude-opus-4-8"  # vision + reasoning model for the agent loop
+screen        = 0                  # monitor index (from list_monitors) the VDI is on
+max_steps     = 20                 # max actions per turn — guards against runaways
+max_long_edge = 1568               # downscale screenshots to this long edge for the API
+effort        = "high"             # reasoning effort ("high" is best for computer use)
+focus_target  = "PVDI"             # local Horizon window to focus before sending input
