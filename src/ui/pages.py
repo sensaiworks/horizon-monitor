@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import threading
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QObject, Signal
 from PySide6.QtGui import QFont
@@ -856,6 +858,225 @@ class PushPage(QWidget):
         self._busy = False
         self.btn_push.setEnabled(True)
         self._set_status(f"Push failed: {msg}")
+
+
+# ---------------------------------------------------------------- Settings tab
+
+def _toml_scalar(value) -> str:
+    """Format a Python value as a TOML literal (scalars + string lists)."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, list):
+        inner = ", ".join(_toml_scalar(str(v)) for v in value)
+        return f"[{inner}]"
+    s = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{s}"'
+
+
+def _update_toml(path: str, updates: dict[tuple[str, str], object]) -> None:
+    """Surgically set `key = value` lines in-place, preserving comments/layout.
+
+    `updates` maps (section, key) -> Python value. Only the matching line's value is
+    rewritten (its trailing inline comment is kept). Missing keys are appended under
+    their section header (added at end if the section itself is absent).
+    """
+    p = Path(path)
+    lines = p.read_text(encoding="utf-8").splitlines(keepends=True)
+    remaining = dict(updates)
+
+    section = ""
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped[1:-1]
+            continue
+        for (sec, key) in list(remaining):
+            if sec == section and re.match(rf"^\s*{re.escape(key)}\s*=", line):
+                hashidx = line.find("#")
+                comment = "  " + line[hashidx:].rstrip("\n") if hashidx != -1 else ""
+                indent = line[: len(line) - len(line.lstrip())]
+                val = _toml_scalar(remaining.pop((sec, key)))
+                lines[i] = f"{indent}{key} = {val}{comment}\n"
+
+    # Append anything not found, grouped by section.
+    if remaining:
+        existing = {l.strip()[1:-1] for l in lines
+                    if l.strip().startswith("[") and l.strip().endswith("]")}
+        by_section: dict[str, list[str]] = {}
+        for (sec, key), value in remaining.items():
+            by_section.setdefault(sec, []).append(f"{key} = {_toml_scalar(value)}\n")
+        tail = []
+        for sec, kvs in by_section.items():
+            if sec and sec not in existing:
+                tail.append(f"\n[{sec}]\n")
+            tail.extend(kvs)
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines.extend(tail)
+
+    p.write_text("".join(lines), encoding="utf-8")
+
+
+def _update_env(path: str, updates: dict[str, str]) -> None:
+    """Set KEY=value lines in a flat .env, updating existing keys or appending new ones."""
+    p = Path(path)
+    lines = p.read_text(encoding="utf-8").splitlines(keepends=True) if p.exists() else []
+    seen = set()
+    for i, line in enumerate(lines):
+        m = re.match(r"^\s*([A-Za-z0-9_]+)\s*=", line)
+        if m and m.group(1) in updates:
+            lines[i] = f"{m.group(1)}={updates[m.group(1)]}\n"
+            seen.add(m.group(1))
+    for k, v in updates.items():
+        if k not in seen:
+            lines.append(f"{k}={v}\n")
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+    p.write_text("".join(lines), encoding="utf-8")
+
+
+# .env keys surfaced in Settings: (env var, label).
+_ENV_KEYS = [
+    ("ANTHROPIC_API_KEY", "Anthropic API key"),
+    ("VOYAGE_API_KEY", "Voyage API key (optional)"),
+    ("HORIZON_PASSWORD", "Horizon unlock password"),
+    ("TELEGRAM_BOT_TOKEN", "Telegram bot token"),
+    ("TELEGRAM_CHAT_ID", "Telegram chat id"),
+]
+
+
+class SettingsPage(QWidget):
+    """Edit config.toml settings and .env secrets in-app.
+
+    config.toml edits are surgical (comments preserved). Secrets are write-only — the
+    current value is never shown; a blank field keeps it, typing a value replaces it.
+    Most changes take effect on the next restart (the config is read at startup).
+    """
+
+    CONFIG_PATH = "config.toml"
+    ENV_PATH = ".env"
+
+    def __init__(self, config: dict) -> None:
+        super().__init__()
+        self._config = config
+
+        page, body = _page_scaffold(
+            "Settings",
+            "Tune the monitor and manage credentials. Most changes apply after a restart.",
+        )
+
+        poll = config.get("polling", {})
+        win = config.get("windows", {})
+        ret = config.get("retention", {})
+        user = config.get("user", {})
+        notif = config.get("notifications", {})
+        control = config.get("control", {})
+
+        # Monitoring
+        mon_card, ml = _card("Monitoring")
+        self.interval = self._spin(ml, "Poll interval", poll.get("interval_seconds", 3),
+                                   1, 120, " s")
+        self.threshold = self._spin(ml, "Change threshold (0–64)",
+                                    poll.get("change_threshold", 10), 0, 64, "")
+        self.retain = self._spin(ml, "Keep data for (0 = forever)",
+                                 ret.get("retain_days", 0), 0, 3650, " days")
+        titles_row = QHBoxLayout()
+        titles_row.addWidget(QLabel("Window titles:"))
+        self.titles = QLineEdit(", ".join(win.get("monitor_titles", [])))
+        self.titles.setPlaceholderText("PVDI, horizon-client")
+        titles_row.addWidget(self.titles, 1)
+        ml.addLayout(titles_row)
+        body.addWidget(mon_card)
+
+        # Behaviour
+        beh_card, bl = _card("Behaviour")
+        name_row = QHBoxLayout()
+        name_row.addWidget(QLabel("Your display name:"))
+        self.display_name = QLineEdit(user.get("display_name", ""))
+        name_row.addWidget(self.display_name, 1)
+        bl.addLayout(name_row)
+        self.cooldown = self._spin(bl, "Re-alert cooldown",
+                                   notif.get("cooldown_minutes", 5), 0, 240, " min")
+        self.control_enabled = QCheckBox("Enable remote control (unlock, keep-awake, push)")
+        self.control_enabled.setChecked(bool(control.get("enabled", False)))
+        bl.addWidget(self.control_enabled)
+        body.addWidget(beh_card)
+
+        # Secrets
+        sec_card, scl = _card(
+            "Credentials (.env)",
+            "Stored locally in .env, never displayed. Leave a field blank to keep the "
+            "current value; type to replace it.",
+        )
+        self._env_edits: dict[str, QLineEdit] = {}
+        for var, label in _ENV_KEYS:
+            row = QHBoxLayout()
+            tag = "set" if os.environ.get(var) else "not set"
+            lbl = QLabel(f"{label}:")
+            lbl.setMinimumWidth(200)
+            edit = QLineEdit()
+            edit.setEchoMode(QLineEdit.EchoMode.Password)
+            edit.setPlaceholderText(f"({tag} — blank to keep)")
+            self._env_edits[var] = edit
+            row.addWidget(lbl)
+            row.addWidget(edit, 1)
+            scl.addLayout(row)
+        body.addWidget(sec_card)
+
+        # Save
+        self.btn_save = QPushButton("Save settings")
+        self.btn_save.setObjectName("Primary")
+        self.btn_save.clicked.connect(self._save)
+        body.addWidget(self.btn_save, 0, Qt.AlignLeft)
+        self.status = QLabel("")
+        self.status.setObjectName("Dim")
+        self.status.setWordWrap(True)
+        body.addWidget(self.status)
+
+        body.addStretch(1)
+        QVBoxLayout(self).addWidget(page)
+
+    def _spin(self, layout, label, value, lo, hi, suffix) -> QSpinBox:
+        row = QHBoxLayout()
+        row.addWidget(QLabel(label + ":"))
+        sp = QSpinBox()
+        sp.setRange(lo, hi)
+        sp.setValue(int(value))
+        if suffix:
+            sp.setSuffix(suffix)
+        row.addWidget(sp)
+        row.addStretch(1)
+        layout.addLayout(row)
+        return sp
+
+    def _save(self) -> None:
+        titles = [t.strip() for t in self.titles.text().split(",") if t.strip()]
+        toml_updates = {
+            ("polling", "interval_seconds"): self.interval.value(),
+            ("polling", "change_threshold"): self.threshold.value(),
+            ("retention", "retain_days"): self.retain.value(),
+            ("windows", "monitor_titles"): titles,
+            ("user", "display_name"): self.display_name.text().strip(),
+            ("notifications", "cooldown_minutes"): self.cooldown.value(),
+            ("control", "enabled"): self.control_enabled.isChecked(),
+        }
+        env_updates = {
+            var: edit.text() for var, edit in self._env_edits.items() if edit.text()
+        }
+        try:
+            _update_toml(self.CONFIG_PATH, toml_updates)
+            if env_updates:
+                _update_env(self.ENV_PATH, env_updates)
+                for var, val in env_updates.items():
+                    os.environ[var] = val   # apply secrets live; config needs a restart
+                    self._env_edits[var].clear()
+                    self._env_edits[var].setPlaceholderText("(set — blank to keep)")
+            saved = "config.toml" + (" + .env" if env_updates else "")
+            self.status.setText(f"Saved {saved}. Restart to apply config changes.")
+        except Exception as exc:  # noqa: BLE001
+            self.status.setText(f"Save failed: {exc}")
 
 
 # --------------------------------------------------------------------- Ask tab

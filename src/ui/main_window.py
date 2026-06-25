@@ -18,9 +18,9 @@ from PySide6.QtWidgets import (
 from .engine import CaptureEngine
 from .pages import (
     AskPage, AssistPage, CollectPage, MonitorPage, PullPage, PushPage, RemotePage,
+    SettingsPage,
 )
 from .theme import COLORS, STATUS_COLORS
-from .pages import _coming_soon  # reuse the dim "coming soon" label helper
 
 
 class _EngineSignals(QObject):
@@ -190,7 +190,7 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(AssistPage(self._config, self._api_key))
         self._stack.addWidget(RemotePage(self._config, self._api_key))
         self._stack.addWidget(AskPage(self._config, self._api_key))
-        self._stack.addWidget(self._settings_page())
+        self._stack.addWidget(SettingsPage(self._config))
 
         # Keep the running engine's alert settings in sync with the Monitor tab.
         self._monitor_page.enabled.toggled.connect(lambda _on: self._sync_engine_config())
@@ -198,19 +198,6 @@ class MainWindow(QMainWindow):
         self._collect_page.record.toggled.connect(lambda _on: self._sync_engine_config())
         self._collect_page.collect_all.toggled.connect(lambda _on: self._sync_engine_config())
         self._collect_page.channels.itemChanged.connect(lambda _i: self._sync_engine_config())
-
-    def _settings_page(self) -> QWidget:
-        page = QWidget()
-        lay = QVBoxLayout(page)
-        lay.setContentsMargins(24, 20, 24, 20)
-        t = QLabel("Settings")
-        t.setObjectName("PageTitle")
-        lay.addWidget(t)
-        lay.addWidget(_coming_soon(
-            "Edit config.toml in-app (poll interval, window titles, retention, control "
-            "enable) and manage .env keys."))
-        lay.addStretch(1)
-        return page
 
     # --------------------------------------------------------- activity log
 
