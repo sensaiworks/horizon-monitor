@@ -180,6 +180,12 @@ class HorizonMCPClient:
         """Return the title/info of the currently focused local window."""
         return self._first_text(await self._call("get_foreground_window"))
 
+    async def get_window_rect(self, target: str) -> dict:
+        """Return a window's rectangle as a dict (Title, Pid, Left/Top/Right/Bottom,
+        Width, Height, Screen, Device). `Screen` is the monitor index it's mostly on —
+        the value to pass as `screen` to the spatial tools. Raises on parse failure."""
+        return json.loads(self._first_text(await self._call("get_window_rect", target=target)))
+
     async def ocr(
         self,
         x: int | None = None,

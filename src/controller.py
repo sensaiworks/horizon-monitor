@@ -66,18 +66,43 @@ class RemoteController:
         self._client = client
         self._focus_target = focus_target
         self._launch_wait = launch_wait
-        # Which monitor the remote surface is on (a list_monitors index). Used to
-        # click the remote at the right place for the unlock CAD step.
+        # Which monitor the remote surface is on (a list_monitors index). This is just
+        # the config FALLBACK — the real index is auto-detected from the Horizon window's
+        # position on first ensure_foreground() (see resolve_screen), since the VDI can be
+        # on any monitor in a multi-display setup and a fixed index reads the wrong screen.
         self._screen = screen
+        self._screen_resolved = False
         # How long redirection takes to sync the clipboard between local and remote,
         # and how long to wait for a copied file to arrive before giving up.
         self._clipboard_sync = clipboard_sync
         self._copy_timeout = copy_timeout
 
     async def ensure_foreground(self) -> None:
-        """Bring the local Horizon client to the foreground so input reaches the remote."""
+        """Bring the local Horizon client to the foreground so input reaches the remote,
+        and (once per controller) detect which monitor it's actually on."""
         await self._client.focus_window(self._focus_target)
         await asyncio.sleep(0.4)
+        await self.resolve_screen()
+
+    async def resolve_screen(self) -> int:
+        """Detect the monitor the Horizon window is on and use it for all spatial ops.
+
+        Reads the window rectangle's `Screen` (a list_monitors index) so screenshots,
+        OCR and clicks target the VDI's actual display — not a hardcoded config index
+        that may point at a different monitor. Cached after the first lookup; falls back
+        to the configured screen if the window can't be found.
+        """
+        if self._screen_resolved:
+            return self._screen
+        try:
+            rect = await self._client.get_window_rect(self._focus_target)
+            screen = rect.get("Screen")
+            if isinstance(screen, int):
+                self._screen = screen
+        except Exception:  # noqa: BLE001 — keep the configured fallback
+            pass
+        self._screen_resolved = True
+        return self._screen
 
     # alias used by the tray / CLI when the user just wants the window up front
     async def bring_to_front(self) -> None:
@@ -95,6 +120,7 @@ class RemoteController:
 
     async def screen_center(self) -> tuple[int, int]:
         """Public centre of the remote surface (default scroll/click point)."""
+        await self.resolve_screen()   # target the VDI's actual monitor before measuring
         return await self._remote_center()
 
     @staticmethod
@@ -335,12 +361,18 @@ class RemoteController:
     # coordinates and is the reliable default.
 
     async def _ocr_lines(self, region: tuple[int, int, int, int] | None) -> list[str]:
-        """OCR the screen (or an x,y,w,h region) and return its non-blank text lines."""
+        """OCR the Horizon screen (or an x,y,w,h region) and return non-blank text lines.
+
+        Always scoped to the resolved Horizon monitor (screen=self._screen) — without it,
+        a no-arg OCR scans the *primary* display, which is usually the local desktop.
+        """
         if region:
             x, y, w, h = region
-            raw = await self._client.ocr(x=x, y=y, width=w, height=h)
+            raw = await self._client.ocr(
+                x=x, y=y, width=w, height=h, screen=self._screen
+            )
         else:
-            raw = await self._client.ocr()
+            raw = await self._client.ocr(screen=self._screen)
         try:
             data = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
@@ -384,7 +416,7 @@ class RemoteController:
         prev_norm = [" ".join(s.split()) for s in acc]
         screens = 1
         for _ in range(max_screens - 1):
-            await self._client.scroll(x, y, "down", scroll_amount)
+            await self._client.scroll(x, y, "down", scroll_amount, screen=self._screen)
             await asyncio.sleep(settle)
             new = await self._ocr_lines(region)
             new_norm = [" ".join(s.split()) for s in new]
