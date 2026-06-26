@@ -529,8 +529,18 @@ class PullPage(QWidget):
         opt_row.addWidget(QLabel("Max screens:"))
         self.max_screens = QSpinBox()
         self.max_screens.setRange(1, 60)
-        self.max_screens.setValue(12)
+        self.max_screens.setValue(20)
         opt_row.addWidget(self.max_screens)
+        opt_row.addSpacing(16)
+        opt_row.addWidget(QLabel("Scroll step:"))
+        self.scroll_step = QSpinBox()
+        self.scroll_step.setRange(1, 40)
+        self.scroll_step.setValue(15)
+        self.scroll_step.setToolTip(
+            "Mouse-wheel notches per scroll. Bigger = fewer passes to reach the bottom; "
+            "too big can skip content. Overlap between passes is de-duplicated."
+        )
+        opt_row.addWidget(self.scroll_step)
         opt_row.addSpacing(16)
         self.lossless = QCheckBox("Try lossless clipboard copy first")
         self.lossless.setToolTip(
@@ -563,10 +573,16 @@ class PullPage(QWidget):
         self.out.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.out.setMinimumHeight(220)
         rl.addWidget(self.out)
+        btn_row = QHBoxLayout()
         self.btn_save = QPushButton("Save to file…")
         self.btn_save.setEnabled(False)
         self.btn_save.clicked.connect(self._save)
-        rl.addWidget(self.btn_save, 0, Qt.AlignLeft)
+        self.btn_clear = QPushButton("Clear")
+        self.btn_clear.clicked.connect(self._clear)
+        btn_row.addWidget(self.btn_save)
+        btn_row.addWidget(self.btn_clear)
+        btn_row.addStretch(1)
+        rl.addLayout(btn_row)
         body.addWidget(res_card, 1)
 
         body.addStretch(1)
@@ -598,15 +614,16 @@ class PullPage(QWidget):
         path = self.path.text().strip() if self.open_first.isChecked() else ""
         self._pull_path = path
         max_screens = self.max_screens.value()
+        scroll_step = self.scroll_step.value()
         lossless = self.lossless.isChecked()
         self._busy = True
         self.btn_pull.setEnabled(False)
         self.btn_save.setEnabled(False)
         threading.Thread(
-            target=self._run, args=(path, max_screens, lossless), daemon=True
+            target=self._run, args=(path, max_screens, scroll_step, lossless), daemon=True
         ).start()
 
-    def _run(self, path: str, max_screens: int, lossless: bool) -> None:
+    def _run(self, path: str, max_screens: int, scroll_step: int, lossless: bool) -> None:
         async def go() -> tuple[str, int]:
             from src.mcp_client import HorizonMCPClient
             cfg = self._config
@@ -626,7 +643,9 @@ class PullPage(QWidget):
                         self._sig.status.emit(f"Clipboard copy unavailable ({exc}); OCR…")
                 self._sig.status.emit("Reading the screen via OCR (scroll-stitching)…")
                 sx, sy = await c.screen_center()
-                return await c.read_scrolling(sx, sy, max_screens=max_screens)
+                return await c.read_scrolling(
+                    sx, sy, max_screens=max_screens, scroll_amount=scroll_step
+                )
 
         try:
             import asyncio
@@ -651,6 +670,15 @@ class PullPage(QWidget):
         self._busy = False
         self.btn_pull.setEnabled(True)
         self._set_status(f"Pull failed: {msg}")
+
+    def _clear(self) -> None:
+        """Reset the result area to start a fresh read."""
+        if self._busy:
+            return
+        self.out.clear()
+        self.warn.setVisible(False)
+        self.btn_save.setEnabled(False)
+        self._set_status("Cleared — ready for a new read.")
 
     def _save(self) -> None:
         from PySide6.QtWidgets import QFileDialog

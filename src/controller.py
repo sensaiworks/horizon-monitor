@@ -400,7 +400,7 @@ class RemoteController:
         y: int,
         region: tuple[int, int, int, int] | None = None,
         max_screens: int = 12,
-        scroll_amount: int = 3,
+        scroll_amount: int = 12,
         settle: float = 0.6,
     ) -> tuple[str, int]:
         """Read a pane taller than one screen: OCR, scroll DOWN at (x, y), OCR again,
