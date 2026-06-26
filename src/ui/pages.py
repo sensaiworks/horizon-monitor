@@ -85,6 +85,26 @@ def _coming_soon(text: str) -> QLabel:
     return lbl
 
 
+def _explain_exc(exc: BaseException) -> str:
+    """Human-readable error message, unwrapping anyio/asyncio ExceptionGroups.
+
+    The MCP stdio client runs tool calls inside a task group, so real failures surface
+    as 'unhandled errors in a TaskGroup (N sub-exception)' — useless to the user. Dig out
+    the underlying leaf exception(s) and report those instead.
+    """
+    group = getattr(exc, "exceptions", None)
+    if group:  # BaseExceptionGroup / ExceptionGroup
+        parts = [_explain_exc(e) for e in group]
+        seen, uniq = set(), []
+        for p in parts:
+            if p not in seen:
+                seen.add(p)
+                uniq.append(p)
+        return "; ".join(uniq)
+    msg = str(exc).strip()
+    return f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__
+
+
 # ----------------------------------------------------------------- Monitor tab
 
 class MonitorPage(QWidget):
@@ -598,8 +618,8 @@ class PullPage(QWidget):
             import asyncio
             text, screens = asyncio.run(go())
             self._sig.result.emit(text, screens)
-        except Exception as exc:  # noqa: BLE001
-            self._sig.error.emit(str(exc))
+        except BaseException as exc:  # noqa: BLE001 — unwrap TaskGroup groups too
+            self._sig.error.emit(_explain_exc(exc))
 
     def _on_result(self, text: str, screens: int) -> None:
         self._busy = False
@@ -846,8 +866,8 @@ class PushPage(QWidget):
             self._sig.done.emit(
                 f"Pushed {len(text)} chars{' and saved' if save else ''}."
             )
-        except Exception as exc:  # noqa: BLE001
-            self._sig.error.emit(str(exc))
+        except BaseException as exc:  # noqa: BLE001 — unwrap TaskGroup groups too
+            self._sig.error.emit(_explain_exc(exc))
 
     def _on_done(self, msg: str) -> None:
         self._busy = False
@@ -1518,8 +1538,8 @@ class RemotePage(QWidget):
             try:
                 asyncio.run(go())
                 self._sig.status.emit(f"{label} — done.")
-            except Exception as exc:  # noqa: BLE001 — surface failures in the UI
-                self._sig.status.emit(f"{label} failed: {exc}")
+            except BaseException as exc:  # noqa: BLE001 — unwrap TaskGroup groups too
+                self._sig.status.emit(f"{label} failed: {_explain_exc(exc)}")
 
         threading.Thread(target=worker, daemon=True).start()
 

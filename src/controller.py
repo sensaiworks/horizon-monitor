@@ -345,7 +345,14 @@ class RemoteController:
             data = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
             return []
-        return [ln for ln in (data.get("lines") or []) if ln.strip()]
+        # horizon-mcp returns lines as objects {text, x, y, width, height, words}, so
+        # pull out each line's text (tolerate a bare-string shape just in case).
+        out: list[str] = []
+        for ln in data.get("lines") or []:
+            text = ln.get("text", "") if isinstance(ln, dict) else str(ln)
+            if text.strip():
+                out.append(text)
+        return out
 
     async def read_screen(
         self, region: tuple[int, int, int, int] | None = None
