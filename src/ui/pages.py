@@ -490,9 +490,10 @@ class PullPage(QWidget):
         self._sig.error.connect(self._on_error)
 
         page, body = _page_scaffold(
-            "Pull code",
-            "Read a file out of the remote VS Code so local AI can work with it. Copy-out "
-            "is blocked here, so this OCRs the editor — lossy, so verify before trusting.",
+            "Pull / read screen",
+            "Read whatever is on the remote screen (email, a doc, VS Code…) into a local "
+            "viewer via OCR — lossy, so verify before trusting. By default it just reads; "
+            "it never types into the remote unless you ask it to open a file first.",
         )
 
         if not self._control_enabled:
@@ -504,13 +505,25 @@ class PullPage(QWidget):
 
         # Pull controls
         ctl_card, cl = _card(
-            "Pull a file",
-            "Give a path to open it in the remote VS Code first, or leave blank to read "
-            "what's already on screen. The view is read top-to-bottom.",
+            "Read the remote screen",
+            "Click Pull to read what's currently on screen, top-to-bottom. Nothing is "
+            "typed into the remote.",
         )
+
+        # Opt-in: open a VS Code file first. OFF by default — when on, it sends Ctrl+P and
+        # TYPES the path, which only makes sense if VS Code is the focused remote app.
+        self.open_first = QCheckBox("Open a file in VS Code first (sends Ctrl+P, then types)")
+        self.open_first.setToolTip(
+            "Leave OFF to just read the current screen. Turn ON only when the remote's "
+            "focused app is VS Code — otherwise the keystrokes go into whatever app is "
+            "focused (e.g. typing into an email)."
+        )
+        cl.addWidget(self.open_first)
         self.path = QLineEdit()
-        self.path.setPlaceholderText("src/app.py  — or blank to read the current screen")
+        self.path.setPlaceholderText("src/app.py  (only used when the box above is checked)")
+        self.path.setEnabled(False)
         cl.addWidget(self.path)
+        self.open_first.toggled.connect(self.path.setEnabled)
 
         opt_row = QHBoxLayout()
         opt_row.addWidget(QLabel("Max screens:"))
@@ -581,7 +594,8 @@ class PullPage(QWidget):
     def _pull(self) -> None:
         if self._busy or not self._control_enabled:
             return
-        path = self.path.text().strip()
+        # Only open (and TYPE) a file path when the user explicitly opted in.
+        path = self.path.text().strip() if self.open_first.isChecked() else ""
         self._pull_path = path
         max_screens = self.max_screens.value()
         lossless = self.lossless.isChecked()
@@ -601,7 +615,7 @@ class PullPage(QWidget):
             ) as client:
                 c = self._controller(client)
                 if path:
-                    self._sig.status.emit(f"Opening {path} in the remote…")
+                    self._sig.status.emit(f"Opening {path} in VS Code…")
                     await c.open_file(path)
                 # Lossless clipboard copy first (works only if copy-out is enabled).
                 if lossless:
