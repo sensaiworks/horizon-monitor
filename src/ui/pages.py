@@ -1206,11 +1206,22 @@ class AssistPage(QWidget):
         self._sig.finished.connect(self._on_finished)
         self._sig.error.connect(lambda e: (self._say("Error", e), self._on_finished()))
 
-        page, body = _page_scaffold(
-            "Assist",
+        # Direct (non-scrolling) layout so the input row stays pinned and visible — the
+        # transcript scrolls internally instead of being pushed off-screen by a stretchy
+        # transcript inside an outer scroll area.
+        body = QVBoxLayout(self)
+        body.setContentsMargins(24, 20, 24, 20)
+        body.setSpacing(14)
+        _title = QLabel("Assist")
+        _title.setObjectName("PageTitle")
+        _subtitle = QLabel(
             "Describe a task on the remote desktop in plain language. The agent looks at "
-            "the screen and helps — read-only advice, or hands-on with your confirmation.",
+            "the screen and helps — read-only advice, or hands-on with your confirmation."
         )
+        _subtitle.setObjectName("PageSubtitle")
+        _subtitle.setWordWrap(True)
+        body.addWidget(_title)
+        body.addWidget(_subtitle)
 
         # Mode + status
         mode_card, mode_lay = _card()
@@ -1278,8 +1289,6 @@ class AssistPage(QWidget):
         row.addWidget(self.stop)
         in_lay.addLayout(row)
         body.addWidget(in_card)
-
-        QVBoxLayout(self).addWidget(page)
 
         self.send.clicked.connect(self._send)
         self.input.returnPressed.connect(self._send)
