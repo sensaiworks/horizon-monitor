@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -27,16 +28,42 @@ except ModuleNotFoundError:  # pragma: no cover - older interpreters
 import click
 from dotenv import load_dotenv
 
-load_dotenv()
 
-CONFIG_PATH = Path(__file__).parent / "config.toml"
+def app_dir() -> Path:
+    """Where config.toml/.env live: beside the .exe when frozen, else the repo root."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
+    return Path(__file__).parent
+
+
+def _bundled(name: str) -> Path:
+    """A file packaged into the PyInstaller archive (or the source tree when not frozen)."""
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+    return base / name
+
+
+APP_DIR = app_dir()
+CONFIG_PATH = APP_DIR / "config.toml"
+
+# Load .env from beside the exe (or the repo root in dev). Missing file is fine.
+load_dotenv(APP_DIR / ".env")
 
 
 def load_config() -> dict:
     if not CONFIG_PATH.exists():
-        raise click.ClickException(
-            f"{CONFIG_PATH.name} not found — copy config.example.toml to config.toml and edit it"
-        )
+        example = _bundled("config.example.toml")
+        if example.exists():
+            import shutil
+            shutil.copy(example, CONFIG_PATH)
+            print(
+                f"Created {CONFIG_PATH} from the bundled template — edit it as needed.",
+                flush=True,
+            )
+        else:
+            raise click.ClickException(
+                f"{CONFIG_PATH.name} not found — copy config.example.toml to config.toml "
+                "and edit it"
+            )
     with open(CONFIG_PATH, "rb") as f:
         return tomllib.load(f)
 
@@ -157,7 +184,9 @@ def tray():
 def app():
     """Launch the desktop app: tray icon + tabbed window (PySide6)."""
     config = load_config()
-    api_key = require_api_key()
+    # Don't hard-require the key here — the window should open even without it so the
+    # user can paste it into the Settings tab. Features that need it error gracefully.
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     from src.ui import run
     raise SystemExit(run(config, api_key))
 
@@ -498,4 +527,7 @@ def _run_query(config: dict, api_key: str, question: str | None) -> None:
 
 
 if __name__ == "__main__":
+    # Double-clicking the packaged .exe (no args) launches the desktop app.
+    if getattr(sys, "frozen", False) and len(sys.argv) == 1:
+        sys.argv.append("app")
     cli()

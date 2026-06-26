@@ -955,12 +955,15 @@ class SettingsPage(QWidget):
     Most changes take effect on the next restart (the config is read at startup).
     """
 
-    CONFIG_PATH = "config.toml"
-    ENV_PATH = ".env"
-
     def __init__(self, config: dict) -> None:
         super().__init__()
         self._config = config
+        # config.toml / .env live beside the .exe when frozen, else the repo root —
+        # the same location main.py reads them from.
+        import sys
+        base = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path.cwd()
+        self.CONFIG_PATH = str(base / "config.toml")
+        self.ENV_PATH = str(base / ".env")
 
         page, body = _page_scaffold(
             "Settings",

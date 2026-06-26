@@ -147,6 +147,29 @@ python main.py remote read-file --out data/pull.txt # copy the whole file to a l
 python main.py remote write-file data/pull.txt --save
 ```
 
+## Packaging a portable .exe
+
+A single-file Windows build is produced with [PyInstaller](https://pyinstaller.org/)
+from `horizon-monitor.spec`:
+
+```powershell
+.venv\Scripts\Activate.ps1
+pip install pyinstaller
+pyinstaller horizon-monitor.spec     # → dist\horizon-monitor.exe  (~115 MB)
+# or just:  .\build_exe.ps1
+```
+
+The result is a self-contained **windowed** app. Double-clicking it launches the desktop
+UI; it reads `config.toml` / `.env` from the folder the `.exe` sits in, auto-creating
+`config.toml` from a bundled template on first run. Drop a `.env` (with `ANTHROPIC_API_KEY`,
+optionally `VOYAGE_API_KEY` / `HORIZON_PASSWORD` / `TELEGRAM_*`) beside the `.exe`, or fill
+them in from the **Settings** tab.
+
+To keep the download small, the build **excludes PyTorch / sentence-transformers**, so RAG
+embeddings use **Voyage** (`VOYAGE_API_KEY`); offline local embeddings remain available when
+running from source. The app still needs `horizon-mcp` (Node) reachable at the path in
+`config.toml`.
+
 ## Configuration
 
 All tunables live in `config.toml`: poll interval, change-detection threshold, monitored
