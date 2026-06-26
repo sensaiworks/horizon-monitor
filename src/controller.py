@@ -97,6 +97,35 @@ class RemoteController:
         """Public centre of the remote surface (default scroll/click point)."""
         return await self._remote_center()
 
+    @staticmethod
+    def _box_center(box: dict) -> tuple[int, int] | None:
+        try:
+            return (
+                int(box["x"] + box["width"] / 2),
+                int(box["y"] + box["height"] / 2),
+            )
+        except (KeyError, TypeError):
+            return None
+
+    async def find_text_point(self, needle: str) -> tuple[int, int] | None:
+        """OCR the remote and return the click point of the first line containing `needle`.
+
+        Coordinates come back in the screen=self._screen frame, so they can be passed
+        straight to click(screen=self._screen). Returns None if not found / OCR fails.
+        """
+        needle = needle.lower()
+        try:
+            raw = await self._client.ocr(screen=self._screen)
+            data = json.loads(raw)
+        except Exception:  # noqa: BLE001 — OCR/parse failure → caller falls back
+            return None
+        for line in data.get("lines") or []:
+            if needle in (line.get("text") or "").lower():
+                point = self._box_center(line)
+                if point:
+                    return point
+        return None
+
     async def unlock(self, password: str, *, submit: bool = True) -> None:
         """Advance the remote lock screen to the logon prompt and TYPE the password.
 
@@ -109,7 +138,9 @@ class RemoteController:
              this VDI forwards keys by scan code (horizon-mcp type_text now sends real
              scan codes), so typing is the only channel that lands. Nothing touches
              the clipboard, so the secret never lingers there.
-          5. optionally press Enter (submit).
+          5. submit by CLICKING the "Sign in" button (located via OCR) — field-tested:
+             Enter alone does NOT submit this LogonUI, but the button click does. Falls
+             back to Enter if the button can't be located.
 
         An empty password is never submitted — a blank/failed entry burns a login
         attempt and risks account lockout.
@@ -124,8 +155,13 @@ class RemoteController:
             return
         await self._client.type_text(password)
         if submit:
-            await asyncio.sleep(0.3)
-            await self._client.key_combo(["Enter"])
+            await asyncio.sleep(0.4)
+            point = await self.find_text_point("sign in")
+            if point:
+                await self._client.click(point[0], point[1], screen=self._screen)
+            else:
+                # Couldn't OCR the button — fall back to Enter (works on some configs).
+                await self._client.key_combo(["Enter"])
 
     async def nudge(self) -> None:
         """Anti-idle keep-alive: focus the remote and jiggle the cursor one pixel.

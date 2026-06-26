@@ -179,11 +179,16 @@ class HorizonMCPClient:
         y: int | None = None,
         width: int | None = None,
         height: int | None = None,
+        screen: int | None = None,
     ) -> str:
         """Windows built-in OCR over the screen (or a region) — returns JSON text.
-        Free/offline; useful as a cheap change pre-filter before Claude Vision."""
+
+        Free/offline; useful as a cheap change pre-filter before Claude Vision. The JSON
+        carries per-line/word boxes `{text, x, y, width, height}`. Pass `screen` (a
+        list_monitors index) so any returned coordinates are 0-based from that monitor —
+        the same frame as click(screen=N) — so an OCR'd box can be clicked directly."""
         return self._first_text(
-            await self._call("ocr", x=x, y=y, width=width, height=height)
+            await self._call("ocr", x=x, y=y, width=width, height=height, screen=screen)
         )
 
     async def wait(self, ms: int) -> str:
