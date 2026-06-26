@@ -121,9 +121,16 @@ class HorizonMCPClient:
             await self._call("double_click", x=x, y=y, screen=screen)
         )
 
-    async def move_mouse(self, x: int, y: int) -> str:
-        """Move the cursor without clicking (hover)."""
-        return self._first_text(await self._call("move_mouse", x=x, y=y))
+    async def move_mouse(self, x: int, y: int, screen: int | None = None) -> str:
+        """Move the cursor without clicking (hover).
+
+        Pass `screen` (a list_monitors index) so x,y are 0-based from that monitor's
+        top-left — the same frame as screenshot(screen=N)/click(screen=N) — instead of
+        absolute virtual-desktop coordinates that could land on another display.
+        """
+        return self._first_text(
+            await self._call("move_mouse", x=x, y=y, screen=screen)
+        )
 
     async def key_combo(
         self, keys: list[str], times: int | None = None, hold_ms: int | None = None

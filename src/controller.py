@@ -164,17 +164,21 @@ class RemoteController:
                 await self._client.key_combo(["Enter"])
 
     async def nudge(self) -> None:
-        """Anti-idle keep-alive: focus the remote and jiggle the cursor one pixel.
+        """Anti-idle keep-alive: focus the remote and jiggle the cursor one pixel
+        INSIDE the Horizon screen.
 
-        Any input resets the session's idle timer; a 1px mouse move changes nothing
-        on screen, clicks nothing, and types nothing — the safest possible nudge.
-        Sending input requires the Horizon client to be foreground, so this briefly
-        steals local focus — intended for when the user has stepped away.
+        The move is screen-relative (screen=self._screen), so (100,100) is 0-based from
+        the Horizon monitor's top-left and stays on the remote display — not an absolute
+        virtual-desktop point that could land on another local monitor. Any input resets
+        the session's idle timer; a 1px move changes nothing on screen, clicks nothing,
+        and types nothing — the safest possible nudge. Sending input requires the Horizon
+        client to be foreground, so this briefly steals local focus — intended for when
+        the user has stepped away.
         """
         await self.ensure_foreground()
-        await self._client.move_mouse(120, 120)
+        await self._client.move_mouse(100, 100, screen=self._screen)
         await asyncio.sleep(0.1)
-        await self._client.move_mouse(121, 120)
+        await self._client.move_mouse(101, 100, screen=self._screen)
 
     async def open_start(self) -> None:
         await self.ensure_foreground()
