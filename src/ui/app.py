@@ -65,7 +65,8 @@ def _build_tray(app: QApplication, win: MainWindow) -> QSystemTrayIcon:
     # Keep the tray icon coloured by engine state.
     def refresh_icon() -> None:
         tray.setIcon(make_status_icon(win.set_engine_icon_status()))
-    for btn in (win._btn_start, win._btn_pause, win._btn_stop):
+    mp = win._monitor_page
+    for btn in (mp.btn_start, mp.btn_pause, mp.btn_stop):
         btn.clicked.connect(refresh_icon)
 
     tray.show()
