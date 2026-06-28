@@ -20,7 +20,7 @@ from .pages import (
     AskPage, AssistPage, CollectPage, MonitorPage, PullPage, PushPage, RemotePage,
     SettingsPage,
 )
-from .theme import COLORS, STATUS_COLORS
+from .theme import COLORS
 
 
 class _EngineSignals(QObject):
@@ -106,37 +106,12 @@ class MainWindow(QMainWindow):
         title = QLabel("horizon-monitor")
         title.setObjectName("AppTitle")
         lay.addWidget(title)
-        lay.addSpacing(8)
-
-        self._engine_pill = QLabel()
-        self._engine_pill.setProperty("class", "pill")
-        lay.addWidget(self._engine_pill)
         lay.addStretch(1)
-
-        self._btn_start = QPushButton("Start")
-        self._btn_start.setObjectName("Primary")
-        self._btn_pause = QPushButton("Pause")
-        self._btn_stop = QPushButton("Stop")
-        self._btn_start.clicked.connect(self._on_start)
-        self._btn_pause.clicked.connect(self._on_pause)
-        self._btn_stop.clicked.connect(self._on_stop)
-        for b in (self._btn_start, self._btn_pause, self._btn_stop):
-            lay.addWidget(b)
-
-        self._refresh_engine()
         return header
 
     def _refresh_engine(self) -> None:
-        labels = {"running": "● Running", "paused": "⏸ Paused", "stopped": "○ Stopped"}
-        color = STATUS_COLORS.get(self._engine_state, COLORS["text_dim"])
-        self._engine_pill.setText(labels.get(self._engine_state, self._engine_state))
-        self._engine_pill.setStyleSheet(
-            f"color: {color}; border: 1px solid {COLORS['border']};"
-            f" border-radius: 11px; padding: 3px 10px; background: {COLORS['surface2']};"
-        )
-        self._btn_start.setEnabled(self._engine_state != "running")
-        self._btn_pause.setEnabled(self._engine_state == "running")
-        self._btn_stop.setEnabled(self._engine_state != "stopped")
+        # Start/Pause/Stop + the status pill live on the Monitor tab's control bar.
+        self._monitor_page.set_engine_state(self._engine_state)
 
     # ----------------------------------------------------------------- nav
 
@@ -180,6 +155,9 @@ class MainWindow(QMainWindow):
     def _build_pages(self) -> None:
         # Order must match the non-separator entries in _NAV.
         self._monitor_page = MonitorPage()
+        self._monitor_page.btn_start.clicked.connect(self._on_start)
+        self._monitor_page.btn_pause.clicked.connect(self._on_pause)
+        self._monitor_page.btn_stop.clicked.connect(self._on_stop)
         self._stack.addWidget(self._monitor_page)
         self._collect_page = CollectPage(self._config, self._api_key)
         self._stack.addWidget(self._collect_page)

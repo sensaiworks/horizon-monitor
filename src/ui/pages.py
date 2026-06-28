@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from .theme import COLORS
+from .theme import COLORS, STATUS_COLORS
 
 
 # --------------------------------------------------------------------- helpers
@@ -121,6 +121,28 @@ class MonitorPage(QWidget):
             "like you went dark. No message content ever leaves this machine.",
         )
 
+        # Engine controls — start/pause/stop the background monitor. This one loop also
+        # feeds the Collect tab, so the controls live here but govern monitoring app-wide.
+        ctl_card, ctl_lay = _card()
+        ctl_row = QHBoxLayout()
+        self.engine_pill = QLabel()
+        self.engine_pill.setProperty("class", "pill")
+        ctl_row.addWidget(self.engine_pill)
+        ctl_row.addStretch(1)
+        self.btn_start = QPushButton("Start")
+        self.btn_start.setObjectName("Primary")
+        self.btn_pause = QPushButton("Pause")
+        self.btn_stop = QPushButton("Stop")
+        for b in (self.btn_start, self.btn_pause, self.btn_stop):
+            ctl_row.addWidget(b)
+        ctl_lay.addLayout(ctl_row)
+        hint = QLabel("Runs the background monitor — also powers the Collect tab's recording.")
+        hint.setObjectName("Dim")
+        hint.setWordWrap(True)
+        ctl_lay.addWidget(hint)
+        body.addWidget(ctl_card)
+        self.set_engine_state("stopped")
+
         # On/off
         top, toplay = _card()
         row = QHBoxLayout()
@@ -201,6 +223,19 @@ class MonitorPage(QWidget):
 
         body.addStretch(1)
         QVBoxLayout(self).addWidget(page)
+
+    def set_engine_state(self, state: str) -> None:
+        """Reflect the capture engine's state in the control bar (pill + button enablement)."""
+        labels = {"running": "● Running", "paused": "⏸ Paused", "stopped": "○ Stopped"}
+        color = STATUS_COLORS.get(state, COLORS["text_dim"])
+        self.engine_pill.setText(labels.get(state, state))
+        self.engine_pill.setStyleSheet(
+            f"color: {color}; border: 1px solid {COLORS['border']};"
+            f" border-radius: 11px; padding: 3px 10px; background: {COLORS['surface2']};"
+        )
+        self.btn_start.setEnabled(state != "running")
+        self.btn_pause.setEnabled(state == "running")
+        self.btn_stop.setEnabled(state != "stopped")
 
     def _add_term(self) -> None:
         text = self.term_input.text().strip()
