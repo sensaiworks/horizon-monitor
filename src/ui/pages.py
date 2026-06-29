@@ -294,9 +294,16 @@ class MonitorPage(QWidget):
 
 # ----------------------------------------------------------------- preview tabs
 
+# Pretty app names for the channel picker, so e.g. "CHAT" shows where it came from.
+_APP_LABELS = {
+    "teams": "MS Teams", "symphony": "Symphony", "outlook": "Outlook",
+    "unknown": "?",
+}
+
+
 class _CollectSignals(QObject):
     status = Signal(str)
-    refreshed = Signal(dict, list)   # stats dict, channel list
+    refreshed = Signal(dict, list)   # stats dict, [(channel, app), ...]
 
 
 class CollectPage(QWidget):
@@ -404,13 +411,15 @@ class CollectPage(QWidget):
         for i in range(self.channels.count()):
             it = self.channels.item(i)
             if it.checkState() == Qt.CheckState.Checked:
-                out.append(it.text())
+                # The raw channel name is stored in UserRole; the visible text also
+                # carries the app label (e.g. "CHAT  ·  MS Teams").
+                out.append(it.data(Qt.ItemDataRole.UserRole))
         return out
 
     def refresh(self) -> None:
         try:
             store = self._store_conn()
-            self._apply_refresh(store.stats(), store.channels())
+            self._apply_refresh(store.stats(), store.channels_with_app())
         except Exception as exc:  # noqa: BLE001
             self._set_status(f"Could not read the store: {exc}")
 
@@ -425,8 +434,10 @@ class CollectPage(QWidget):
         keep = set(self.selected_channels())
         self.channels.blockSignals(True)
         self.channels.clear()
-        for ch in channels:
-            it = QListWidgetItem(ch)
+        for ch, app in channels:
+            label = _APP_LABELS.get(app, app or "?")
+            it = QListWidgetItem(f"{ch}    ·  {label}")
+            it.setData(Qt.ItemDataRole.UserRole, ch)   # raw channel = the filter value
             it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             it.setCheckState(
                 Qt.CheckState.Checked if (not keep or ch in keep) else Qt.CheckState.Unchecked
@@ -455,7 +466,7 @@ class CollectPage(QWidget):
                 )
                 rag.connect()
                 msg = fn(store, rag)
-                self._sig.refreshed.emit(store.stats(), store.channels())
+                self._sig.refreshed.emit(store.stats(), store.channels_with_app())
                 self._sig.status.emit(msg)
             except Exception as exc:  # noqa: BLE001
                 self._sig.status.emit(f"{label} failed: {exc}")

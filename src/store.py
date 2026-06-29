@@ -170,6 +170,23 @@ class EventStore:
         ).fetchall()
         return [r[0] for r in rows]
 
+    def channels_with_app(self) -> list[tuple[str, str]]:
+        """Distinct channels paired with the app they came from, for the Collect picker.
+
+        A channel almost always belongs to one app; if it somehow spans apps, the most
+        frequent app wins. Returns (channel, app) sorted by channel.
+        """
+        assert self._conn is not None, "call connect() first"
+        rows = self._conn.execute(
+            "SELECT channel, app, COUNT(*) AS n FROM events "
+            "WHERE channel <> '' GROUP BY channel, app ORDER BY channel, n DESC"
+        ).fetchall()
+        dominant: dict[str, str] = {}
+        for ch, app, _n in rows:
+            if ch not in dominant:                 # first row per channel = most frequent app
+                dominant[ch] = app or "unknown"
+        return sorted(dominant.items())
+
     def close(self) -> None:
         if self._conn is not None:
             self._conn.close()
