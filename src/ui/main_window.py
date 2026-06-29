@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QPushButton, QStackedWidget, QVBoxLayout, QWidget,
 )
 
+from . import state
 from .engine import CaptureEngine
 from .pages import (
     AskPage, AssistPage, CollectPage, MonitorPage, PullPage, PushPage, RemotePage,
@@ -93,13 +94,16 @@ class MainWindow(QMainWindow):
         self._stack.setCurrentIndex(0)
         self.log("Ready. Press Start to begin monitoring.")
 
+        # Restore saved UI preferences (watch terms/toggles + channel picks) before wiring
+        # the save hooks, so applying them doesn't immediately re-save. Record defaults to
+        # on (CollectPage), so "auto-start also collects" still holds on a fresh install.
+        self._restore_ui_state()
+        self._wire_state_persistence()
+
         # Auto-start the engine on launch when [capture].auto_start is set. Deferred a
         # beat so the window paints first; _on_start builds + starts the CaptureEngine,
-        # which then (if control is enabled) rotates apps + unlocks. Turn Collect ON so
-        # "start collecting as well" holds — _on_start → _sync_engine_config reads this
-        # toggle, which otherwise defaults off.
+        # which then (if control is enabled) rotates apps + unlocks.
         if self._config.get("capture", {}).get("auto_start", False):
-            self._collect_page.record.setChecked(True)
             self.log("Auto-start enabled — beginning monitoring + collecting…")
             QTimer.singleShot(800, self._on_start)
 
@@ -222,6 +226,60 @@ class MainWindow(QMainWindow):
         ts = datetime.now().strftime("%H:%M:%S")
         self._log.appendPlainText(f"{ts}  {message}")
 
+    # ------------------------------------------------- UI state persistence
+
+    def _gather_ui_state(self) -> dict:
+        mp, cp = self._monitor_page, self._collect_page
+        return {
+            "monitor": {
+                "enabled": mp.enabled.isChecked(),
+                "telegram": mp.telegram.isChecked(),
+                "beep": mp.beep.isChecked(),
+                "terms": [mp.terms.item(i).text() for i in range(mp.terms.count())],
+            },
+            "collect": {
+                "record": cp.record.isChecked(),
+                "collect_all": cp.collect_all.isChecked(),
+                "channels": cp.selected_channels(),
+            },
+        }
+
+    def _restore_ui_state(self) -> None:
+        st = state.load(self._config)
+        mp, cp = self._monitor_page, self._collect_page
+        m = st.get("monitor", {})
+        if isinstance(m, dict):
+            if "enabled" in m:
+                mp.enabled.setChecked(bool(m["enabled"]))
+            if "telegram" in m:
+                mp.telegram.setChecked(bool(m["telegram"]))
+            if "beep" in m:
+                mp.beep.setChecked(bool(m["beep"]))
+            mp.terms.clear()
+            for t in m.get("terms") or []:
+                if str(t).strip():
+                    mp.terms.addItem(str(t))
+        c = st.get("collect", {})
+        if isinstance(c, dict):
+            cp.set_persisted(
+                record=c.get("record", cp.record.isChecked()),
+                collect_all=c.get("collect_all", cp.collect_all.isChecked()),
+                channels=c.get("channels"),   # None when absent → default to all channels
+            )
+
+    def _wire_state_persistence(self) -> None:
+        mp, cp = self._monitor_page, self._collect_page
+        for sig in (
+            mp.enabled.toggled, mp.telegram.toggled, mp.beep.toggled,
+            cp.record.toggled, cp.collect_all.toggled, cp.channels.itemChanged,
+        ):
+            sig.connect(lambda *_: self._save_ui_state())
+        mp.terms.model().rowsInserted.connect(lambda *_: self._save_ui_state())
+        mp.terms.model().rowsRemoved.connect(lambda *_: self._save_ui_state())
+
+    def _save_ui_state(self) -> None:
+        state.save(self._config, self._gather_ui_state())
+
     # ----------------------------------------------------- engine handlers
 
     def _ensure_engine(self) -> CaptureEngine:
@@ -311,5 +369,6 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 — Qt override
         """Hide to tray instead of quitting (the tray menu's Quit really exits)."""
+        self._save_ui_state()
         event.ignore()
         self.hide()

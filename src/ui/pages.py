@@ -318,6 +318,9 @@ class CollectPage(QWidget):
         super().__init__()
         self._config = config
         self._store = None   # lazy EventStore (SQLite — fast, read on the UI thread)
+        # Persisted channel selection (raw names). None = no saved prefs → default to all
+        # checked; a set means restore exactly those, surviving Refresh re-populates.
+        self._restore_channels: set[str] | None = None
 
         self._sig = _CollectSignals()
         self._sig.status.connect(self._set_status)
@@ -389,8 +392,22 @@ class CollectPage(QWidget):
         refresh_btn.clicked.connect(self.refresh)
         self.btn_older.clicked.connect(self._delete_older)
         self.btn_purge.clicked.connect(self._purge_all)
+        self.channels.itemChanged.connect(self._channel_toggled)
         self.channels.setEnabled(not self.collect_all.isChecked())
         self.refresh()
+
+    def set_persisted(self, record: bool, collect_all: bool, channels: list | None) -> None:
+        """Restore saved Collect prefs (called once at startup before signals are wired)."""
+        self.record.setChecked(bool(record))
+        self.collect_all.setChecked(bool(collect_all))
+        self.channels.setEnabled(not collect_all)
+        self._restore_channels = set(channels) if channels is not None else None
+        self.refresh()
+
+    def _channel_toggled(self, _item) -> None:
+        # A user tick/untick becomes the selection to remember (fires only on real edits —
+        # _apply_refresh blocks signals while it rebuilds the list).
+        self._restore_channels = set(self.selected_channels())
 
     # ------------------------------------------------------------ helpers
 
@@ -431,7 +448,14 @@ class CollectPage(QWidget):
         self.stats_label.setText(
             f"{total} event(s) · {span}\nTop channels: {top}"
         )
-        keep = set(self.selected_channels())
+        # Which channels stay checked: a restored/edited selection if we have one,
+        # otherwise the live selection (default: all checked on a fresh start).
+        keep = self._restore_channels
+        if keep is None:
+            keep = set(self.selected_channels())
+            default_all = True
+        else:
+            default_all = False
         self.channels.blockSignals(True)
         self.channels.clear()
         for ch, app in channels:
@@ -439,9 +463,8 @@ class CollectPage(QWidget):
             it = QListWidgetItem(f"{ch}    ·  {label}")
             it.setData(Qt.ItemDataRole.UserRole, ch)   # raw channel = the filter value
             it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            it.setCheckState(
-                Qt.CheckState.Checked if (not keep or ch in keep) else Qt.CheckState.Unchecked
-            )
+            checked = (default_all and not keep) or ch in keep
+            it.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
             self.channels.addItem(it)
         self.channels.blockSignals(False)
 
