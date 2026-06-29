@@ -207,8 +207,8 @@ def _parse_coords(s: str, n: int, what: str) -> tuple[int, ...]:
     "action",
     type=click.Choice(
         [
-            "unlock", "keep-alive", "launch", "activate", "run", "foreground", "reply",
-            "read-file", "write-file", "open",
+            "unlock", "keep-alive", "launch", "activate", "taskbar", "run", "foreground",
+            "reply", "read-file", "write-file", "open",
             "read-screen", "read-scroll", "paste",
         ]
     ),
@@ -334,6 +334,11 @@ async def _run_remote(
             if not value:
                 raise click.ClickException(f"'{action}' needs an app name")
             await c.launch_or_activate(value)
+        elif action == "taskbar":
+            if not value:
+                raise click.ClickException("'taskbar' needs an app term to match")
+            ok = await c.activate_taskbar([value])
+            print(f"remote: taskbar {'ACTIVATED' if ok else 'NOT FOUND'}: {value!r}", flush=True)
         elif action == "run":
             if not value:
                 raise click.ClickException("'run' needs a command")

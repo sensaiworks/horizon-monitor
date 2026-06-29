@@ -11,6 +11,42 @@ focus_before_shot = false     # true only if Horizon won't render unless active 
 [windows]
 monitor_titles = ["PVDI", "horizon-client"]  # partial window title matches (case-insensitive)
 
+[capture]
+# Auto-start monitoring + collecting when the app launches. When rotate=true (and
+# [control].enabled), the monitor also cycles through the apps in [[capture.targets]]:
+# it brings each to the front by CLICKING its taskbar button (found by OCR-matching the
+# label, re-read each cycle so button drift doesn't matter), screenshots the whole VDI,
+# and captures it (per-app change detection). With rotate=false it just runs the
+# read-only passive monitor (no focus-stealing, no typing, no unlock).
+auto_start          = true
+# Keep rotate=false until you've calibrated the taskbar match terms below (test one with
+# `python main.py remote taskbar Symphony`). Then flip to true.
+rotate              = false
+settle_seconds      = 1.2   # wait after switching to an app before the screenshot
+cycle_seconds       = 8     # pause between full rotations
+# Rotation steals local focus, so it yields to you: the instant you touch the mouse or
+# keyboard it pauses, and resumes only after you've been idle this long.
+idle_resume_seconds = 90
+auto_unlock         = true  # if the session is locked, unlock it (needs HORIZON_PASSWORD)
+unlock_cooldown_seconds = 120  # never re-submit the password more often than this
+
+# Apps to rotate through. `match` = substrings to look for in the taskbar button label
+# (case-insensitive, first match wins). Tune these to whatever YOUR taskbar shows — e.g.
+# Teams' button is often truncated to the active chat title, so match on a stable part.
+# Apps not currently on the taskbar are skipped. (Scalars above MUST stay above these
+# array-of-tables — TOML assigns bare keys to the last table header.)
+[[capture.targets]]
+name  = "Teams"
+match = ["Microsoft Teams", "| Teams", "Chat |"]
+
+[[capture.targets]]
+name  = "Outlook"
+match = ["Outlook"]
+
+[[capture.targets]]
+name  = "Symphony"
+match = ["Symphony"]
+
 [claude]
 vision_model = "claude-haiku-4-5-20251001"
 query_model  = "claude-sonnet-4-6"

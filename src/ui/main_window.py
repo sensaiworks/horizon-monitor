@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from PySide6.QtCore import Qt, QObject, Signal
+from PySide6.QtCore import Qt, QObject, QTimer, Signal
 from PySide6.QtWidgets import (
     QButtonGroup, QFrame, QHBoxLayout, QLabel, QMainWindow, QPlainTextEdit,
     QPushButton, QStackedWidget, QVBoxLayout, QWidget,
@@ -92,6 +92,16 @@ class MainWindow(QMainWindow):
         self._nav_buttons[0].setChecked(True)
         self._stack.setCurrentIndex(0)
         self.log("Ready. Press Start to begin monitoring.")
+
+        # Auto-start the engine on launch when [capture].auto_start is set. Deferred a
+        # beat so the window paints first; _on_start builds + starts the CaptureEngine,
+        # which then (if control is enabled) rotates apps + unlocks. Turn Collect ON so
+        # "start collecting as well" holds — _on_start → _sync_engine_config reads this
+        # toggle, which otherwise defaults off.
+        if self._config.get("capture", {}).get("auto_start", False):
+            self._collect_page.record.setChecked(True)
+            self.log("Auto-start enabled — beginning monitoring + collecting…")
+            QTimer.singleShot(800, self._on_start)
 
     # --------------------------------------------------------------- header
 

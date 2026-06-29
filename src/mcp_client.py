@@ -76,6 +76,17 @@ class HorizonMCPClient:
         b64: str = result.content[0].data
         return base64.b64decode(b64)
 
+    async def screenshot_region(
+        self, x: int, y: int, width: int, height: int, screen: int | None = None
+    ) -> bytes:
+        """Return raw PNG bytes for a rectangle. With `screen` omitted, x,y are absolute
+        virtual-desktop pixels — the way to capture a VDI window that spans monitors."""
+        result = await self._call(
+            "screenshot_region", x=x, y=y, width=width, height=height, screen=screen
+        )
+        b64: str = result.content[0].data
+        return base64.b64decode(b64)
+
     async def list_windows(self) -> list[ProcessInfo]:
         """Return all visible windows."""
         result = await self._call("list_windows")

@@ -66,12 +66,15 @@ class RemoteController:
         self._client = client
         self._focus_target = focus_target
         self._launch_wait = launch_wait
-        # Which monitor the remote surface is on (a list_monitors index). This is just
-        # the config FALLBACK — the real index is auto-detected from the Horizon window's
-        # position on first ensure_foreground() (see resolve_screen), since the VDI can be
-        # on any monitor in a multi-display setup and a fixed index reads the wrong screen.
+        # The VDI's on-screen rectangle in ABSOLUTE virtual-desktop pixels
+        # (Left, Top, Width, Height), auto-detected from the Horizon window on first use.
+        # We deliberately work in absolute coords rather than a single list_monitors index
+        # because this VDI SPANS TWO MONITORS: a per-monitor index only ever sees/clicks
+        # one half, so OCR misses (and clicks miss) anything on the other half — which is
+        # exactly how the unlock "Sign in" button got clicked on the wrong screen. `screen`
+        # is kept only as a legacy fallback origin if the window rect can't be read.
         self._screen = screen
-        self._screen_resolved = False
+        self._rect: tuple[int, int, int, int] | None = None
         # How long redirection takes to sync the clipboard between local and remote,
         # and how long to wait for a copied file to arrive before giving up.
         self._clipboard_sync = clipboard_sync
@@ -79,48 +82,44 @@ class RemoteController:
 
     async def ensure_foreground(self) -> None:
         """Bring the local Horizon client to the foreground so input reaches the remote,
-        and (once per controller) detect which monitor it's actually on."""
+        and (once per controller) detect its absolute on-screen rectangle."""
         await self._client.focus_window(self._focus_target)
         await asyncio.sleep(0.4)
-        await self.resolve_screen()
+        await self.resolve_rect()
 
-    async def resolve_screen(self) -> int:
-        """Detect the monitor the Horizon window is on and use it for all spatial ops.
+    async def resolve_rect(self) -> tuple[int, int, int, int]:
+        """Detect the VDI's absolute on-screen rectangle (Left, Top, Width, Height).
 
-        Reads the window rectangle's `Screen` (a list_monitors index) so screenshots,
-        OCR and clicks target the VDI's actual display — not a hardcoded config index
-        that may point at a different monitor. Cached after the first lookup; falls back
-        to the configured screen if the window can't be found.
+        All spatial ops (screenshot region, OCR, clicks, scroll) use these absolute
+        virtual-desktop coordinates so they address the WHOLE VDI correctly even when it
+        spans multiple monitors. Cached after the first successful lookup; falls back to
+        the configured monitor's origin only if the window can't be found.
         """
-        if self._screen_resolved:
-            return self._screen
+        if self._rect is not None:
+            return self._rect
         try:
-            rect = await self._client.get_window_rect(self._focus_target)
-            screen = rect.get("Screen")
-            if isinstance(screen, int):
-                self._screen = screen
-        except Exception:  # noqa: BLE001 — keep the configured fallback
+            r = await self._client.get_window_rect(self._focus_target)
+            left, top = int(r["Left"]), int(r["Top"])
+            w, h = int(r["Width"]), int(r["Height"])
+            if w > 0 and h > 0:
+                self._rect = (left, top, w, h)
+        except Exception:  # noqa: BLE001 — fall back below
             pass
-        self._screen_resolved = True
-        return self._screen
+        if self._rect is None:
+            self._rect = (0, 0, 1920, 1080)
+        return self._rect
 
     # alias used by the tray / CLI when the user just wants the window up front
     async def bring_to_front(self) -> None:
         await self.ensure_foreground()
 
     async def _remote_center(self) -> tuple[int, int]:
-        """Centre of the remote surface, in the same coord frame as click(screen=)."""
-        from io import BytesIO
-
-        from PIL import Image
-
-        png = await self._client.screenshot(screen=self._screen)
-        w, h = Image.open(BytesIO(png)).size
-        return w // 2, h // 2
+        """Centre of the VDI in ABSOLUTE virtual-desktop pixels (click with no `screen`)."""
+        left, top, w, h = await self.resolve_rect()
+        return left + w // 2, top + h // 2
 
     async def screen_center(self) -> tuple[int, int]:
-        """Public centre of the remote surface (default scroll/click point)."""
-        await self.resolve_screen()   # target the VDI's actual monitor before measuring
+        """Public centre of the remote surface (default scroll/click point), absolute."""
         return await self._remote_center()
 
     @staticmethod
@@ -134,14 +133,18 @@ class RemoteController:
             return None
 
     async def find_text_point(self, needle: str) -> tuple[int, int] | None:
-        """OCR the remote and return the click point of the first line containing `needle`.
+        """OCR the VDI and return the ABSOLUTE click point of the first line containing
+        `needle`.
 
-        Coordinates come back in the screen=self._screen frame, so they can be passed
-        straight to click(screen=self._screen). Returns None if not found / OCR fails.
+        OCR runs over the whole VDI rectangle in absolute virtual-desktop coordinates, so
+        the returned box is absolute and can be passed straight to click() with NO
+        `screen` — the only frame that works when the VDI spans monitors. Returns None if
+        not found / OCR fails.
         """
         needle = needle.lower()
+        left, top, w, h = await self.resolve_rect()
         try:
-            raw = await self._client.ocr(screen=self._screen)
+            raw = await self._client.ocr(x=left, y=top, width=w, height=h)
             data = json.loads(raw)
         except Exception:  # noqa: BLE001 — OCR/parse failure → caller falls back
             return None
@@ -151,6 +154,39 @@ class RemoteController:
                 if point:
                     return point
         return None
+
+    async def activate_taskbar(
+        self, needles: list[str], taskbar_height: int = 56
+    ) -> bool:
+        """Bring an app to the front by clicking its TASKBAR button.
+
+        OCRs only the bottom `taskbar_height` strip of the VDI (so desktop/window text
+        can't match) and clicks the first button whose label contains any of `needles`
+        (case-insensitive). Re-read every call, so it tolerates the buttons shifting as
+        windows open/close — unlike a fixed coordinate. Returns True if a button was
+        found and clicked, False if no label matched (e.g. the app isn't running).
+
+        NOTE: a Windows taskbar click TOGGLES — clicking the already-foreground app
+        minimizes it. Callers that rotate through several apps avoid this naturally by
+        always clicking a different app than the current foreground one.
+        """
+        await self.ensure_foreground()
+        left, top, w, h = await self.resolve_rect()
+        strip_top = top + max(0, h - taskbar_height)
+        try:
+            raw = await self._client.ocr(x=left, y=strip_top, width=w, height=taskbar_height)
+            data = json.loads(raw)
+        except Exception:  # noqa: BLE001 — OCR/parse failure → report not-found
+            return False
+        wants = [n.lower() for n in needles if n and n.strip()]
+        for line in data.get("lines") or []:
+            text = (line.get("text") or "").lower()
+            if any(n in text for n in wants):
+                point = self._box_center(line)
+                if point:
+                    await self._client.click(point[0], point[1])  # absolute coords
+                    return True
+        return False
 
     async def unlock(self, password: str, *, submit: bool = True) -> None:
         """Advance the remote lock screen to the logon prompt and TYPE the password.
@@ -173,7 +209,7 @@ class RemoteController:
         """
         await self.ensure_foreground()
         cx, cy = await self._remote_center()
-        await self._client.click(cx, cy, screen=self._screen)   # give the remote input focus
+        await self._client.click(cx, cy)        # absolute coords; give the remote focus
         await asyncio.sleep(0.4)
         await self._client.key_combo(["Ctrl", "Alt", "Insert"])  # Horizon's Ctrl+Alt+Del
         await asyncio.sleep(2.5)                                 # wait for the login prompt
@@ -184,7 +220,7 @@ class RemoteController:
             await asyncio.sleep(0.4)
             point = await self.find_text_point("sign in")
             if point:
-                await self._client.click(point[0], point[1], screen=self._screen)
+                await self._client.click(point[0], point[1])   # absolute virtual coords
             else:
                 # Couldn't OCR the button — fall back to Enter (works on some configs).
                 await self._client.key_combo(["Enter"])
@@ -358,18 +394,18 @@ class RemoteController:
     # coordinates and is the reliable default.
 
     async def _ocr_lines(self, region: tuple[int, int, int, int] | None) -> list[str]:
-        """OCR the Horizon screen (or an x,y,w,h region) and return non-blank text lines.
+        """OCR the VDI (or an absolute x,y,w,h region) and return non-blank text lines.
 
-        Always scoped to the resolved Horizon monitor (screen=self._screen) — without it,
-        a no-arg OCR scans the *primary* display, which is usually the local desktop.
+        With no region, OCR covers the whole VDI rectangle in absolute virtual-desktop
+        coordinates — without that, a no-arg OCR scans the *primary* display, which is the
+        local desktop, not the (possibly multi-monitor-spanning) remote.
         """
         if region:
             x, y, w, h = region
-            raw = await self._client.ocr(
-                x=x, y=y, width=w, height=h, screen=self._screen
-            )
+            raw = await self._client.ocr(x=x, y=y, width=w, height=h)
         else:
-            raw = await self._client.ocr(screen=self._screen)
+            left, top, w, h = await self.resolve_rect()
+            raw = await self._client.ocr(x=left, y=top, width=w, height=h)
         try:
             data = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
@@ -413,7 +449,7 @@ class RemoteController:
         prev_norm = [" ".join(s.split()) for s in acc]
         screens = 1
         for _ in range(max_screens - 1):
-            await self._client.scroll(x, y, "down", scroll_amount, screen=self._screen)
+            await self._client.scroll(x, y, "down", scroll_amount)  # absolute coords
             await asyncio.sleep(settle)
             new = await self._ocr_lines(region)
             new_norm = [" ".join(s.split()) for s in new]

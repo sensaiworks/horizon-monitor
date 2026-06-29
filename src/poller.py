@@ -46,6 +46,12 @@ class Poller:
         self._monitor_titles = [t.lower() for t in (monitor_titles or ["pvdi"])]
         self._focus = focus_before_shot
         self._prev_hash: imagehash.ImageHash | None = None
+        # Absolute VDI rectangle (Left, Top, W, H). The Horizon window can SPAN monitors,
+        # so a single-monitor screenshot only captures half of it; when we can resolve the
+        # rect we grab the whole window via screenshot_region instead. Falls back to the
+        # configured screen index if the rect can't be read.
+        self._rect: tuple[int, int, int, int] | None = None
+        self._rect_tried = False
 
     async def find_horizon_window(self) -> ProcessInfo | None:
         """Return the first window whose title matches any monitor_titles entry."""
@@ -54,6 +60,30 @@ class Poller:
             if any(t in w.title.lower() for t in self._monitor_titles):
                 return w
         return None
+
+    async def _resolve_rect(self) -> tuple[int, int, int, int] | None:
+        """Resolve the Horizon window's absolute rect once (cached). None if not found."""
+        if self._rect_tried:
+            return self._rect
+        self._rect_tried = True
+        for title in self._monitor_titles:
+            try:
+                r = await self._client.get_window_rect(title)
+                w, h = int(r["Width"]), int(r["Height"])
+                if w > 0 and h > 0:
+                    self._rect = (int(r["Left"]), int(r["Top"]), w, h)
+                    return self._rect
+            except Exception:  # noqa: BLE001 — try the next title, else fall back
+                continue
+        return self._rect
+
+    async def _grab(self) -> bytes:
+        """Capture the whole Horizon window (spans monitors) when its rect is known;
+        otherwise fall back to a single-monitor screenshot."""
+        rect = await self._resolve_rect()
+        if rect:
+            return await self._client.screenshot_region(*rect)
+        return await self._client.screenshot(screen=self._screen)
 
     def _detect_change(self, png_bytes: bytes) -> tuple[bool, str]:
         """Return (changed, hash_str). Updates internal previous hash."""
@@ -95,7 +125,7 @@ class Poller:
                 else:
                     window = None
 
-                png = await self._client.screenshot(screen=self._screen)
+                png = await self._grab()
                 if not png:
                     print("WARNING: empty screenshot bytes — check screen_index in config.toml", flush=True)
                     await asyncio.sleep(self._interval)

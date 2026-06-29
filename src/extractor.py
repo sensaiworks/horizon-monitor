@@ -31,32 +31,39 @@ Return a JSON object ONLY, no explanation, no markdown:
     {{
       "speaker": "Full Name or username",
       "message": "exact message text",
-      "app": "teams" | "symphony" | "unknown",
-      "channel": "conversation / channel / room / thread name shown in the UI",
-      "time": "the message's on-screen timestamp exactly as shown",
+      "app": "teams" | "symphony" | "outlook" | "unknown",
+      "channel": "conversation / channel / room / thread / mail folder shown in the UI",
+      "time": "the item's on-screen timestamp exactly as shown",
       "directed_at_user": true | false
     }}
   ]
 }}
 
 lock_screen is true if the screen shows a Windows lock screen (clock visible,
-"Press Ctrl+Alt+Delete to unlock", dark/black screen with no chat content).
+"Press Ctrl+Alt+Delete to unlock", dark/black screen with no content).
 
 If lock_screen is true, messages must be [].
 
-messages contains all visible chat messages from Microsoft Teams or Symphony.
+messages contains the visible items from whichever app is in the foreground:
+  - Microsoft Teams or Symphony: each chat message → speaker = sender,
+    message = the message text, app = "teams" or "symphony".
+  - Microsoft Outlook (mail): each visible email in the list or the open reading
+    pane → speaker = the sender's name, message = the subject line followed by a
+    short snippet of the body if visible, app = "outlook". Only include real
+    emails, not toolbar/UI text.
 
-channel is the name of the open conversation, channel, room, or thread (e.g.
-"Deployments", "John Smith", "Trading Desk") — read it from the header or the
-selected item in the sidebar. Use "" if you cannot tell.
+channel is the open conversation, channel, room, or thread name for chat apps, or
+the mail folder / account (e.g. "Inbox", "Deployments", "John Smith") for Outlook —
+read it from the header or the selected sidebar item. Use "" if you cannot tell.
 
-time is the timestamp shown next to or above the message, copied verbatim (e.g.
+time is the timestamp shown next to or above the item, copied verbatim (e.g.
 "10:32 AM", "Yesterday 14:05", "Mon 09:14"). Use "" if no time is visible for it.
 
-directed_at_user is true if the message @mentions "{user}", uses their first name
-"{user}" directly, or is a direct/private message thread to them.
+directed_at_user is true if the item @mentions "{user}", uses their first name
+"{user}" directly, is a direct/private message thread to them, or (for Outlook) is
+an email addressed/sent to them.
 
-If no chat app is visible or no messages are present, return messages: [].
+If no recognized app is visible or no items are present, return messages: [].
 """
 
 

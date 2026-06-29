@@ -15,7 +15,7 @@ class MessageEvent(BaseModel):
     timestamp: datetime = Field(default_factory=_utcnow)  # when we captured it
     speaker: str
     message: str
-    app: Literal["teams", "symphony", "unknown"] = "unknown"
+    app: Literal["teams", "symphony", "outlook", "unknown"] = "unknown"
     window_title: str = ""
     directed_at_user: bool = False
     # The chat's own timestamp as rendered on screen (e.g. "10:32 AM",
