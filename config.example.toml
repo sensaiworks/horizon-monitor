@@ -37,7 +37,9 @@ unlock_cooldown_seconds = 120  # never re-submit the password more often than th
 # array-of-tables — TOML assigns bare keys to the last table header.)
 [[capture.targets]]
 name  = "Teams"
-match = ["Microsoft Teams", "| Teams", "Chat |"]
+# NB: Windows OCR reads the pipe "|" as "I", so don't put "|" in match terms — the Teams
+# button "Chat | PSA Azure …" OCRs as "Chat I PSA Azure …". Match the plain words instead.
+match = ["Microsoft Teams", "Teams", "Chat"]
 
 [[capture.targets]]
 name  = "Outlook"
