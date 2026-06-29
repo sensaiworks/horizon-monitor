@@ -7,7 +7,9 @@ log — the real CaptureEngine is wired in the next phase.
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QObject, QTimer, Signal
 from PySide6.QtWidgets import (
@@ -31,6 +33,12 @@ class _EngineSignals(QObject):
     alert = Signal(object)   # MessageEvent
     log = Signal(str)
     error = Signal(str)
+
+
+class _WebcamSignals(QObject):
+    """Marshal WebcamWatcher thread callbacks onto the Qt UI thread."""
+    event = Signal(object)   # WebcamEvent
+    log = Signal(str)
 
 # (page label, emoji, page-factory-key)
 _NAV = [
@@ -99,6 +107,7 @@ class MainWindow(QMainWindow):
         # on (CollectPage), so "auto-start also collects" still holds on a fresh install.
         self._restore_ui_state()
         self._wire_state_persistence()
+        self._setup_webcam_watch()
 
         # Auto-start the engine on launch when [capture].auto_start is set. Deferred a
         # beat so the window paints first; _on_start builds + starts the CaptureEngine,
@@ -235,6 +244,7 @@ class MainWindow(QMainWindow):
                 "enabled": mp.enabled.isChecked(),
                 "telegram": mp.telegram.isChecked(),
                 "beep": mp.beep.isChecked(),
+                "webcam": mp.webcam_watch.isChecked(),
                 "terms": [mp.terms.item(i).text() for i in range(mp.terms.count())],
             },
             "collect": {
@@ -255,6 +265,8 @@ class MainWindow(QMainWindow):
                 mp.telegram.setChecked(bool(m["telegram"]))
             if "beep" in m:
                 mp.beep.setChecked(bool(m["beep"]))
+            if "webcam" in m:
+                mp.webcam_watch.setChecked(bool(m["webcam"]))
             mp.terms.clear()
             for t in m.get("terms") or []:
                 if str(t).strip():
@@ -271,6 +283,7 @@ class MainWindow(QMainWindow):
         mp, cp = self._monitor_page, self._collect_page
         for sig in (
             mp.enabled.toggled, mp.telegram.toggled, mp.beep.toggled,
+            mp.webcam_watch.toggled,
             cp.record.toggled, cp.collect_all.toggled, cp.channels.itemChanged,
         ):
             sig.connect(lambda *_: self._save_ui_state())
@@ -279,6 +292,95 @@ class MainWindow(QMainWindow):
 
     def _save_ui_state(self) -> None:
         state.save(self._config, self._gather_ui_state())
+
+    # ------------------------------------------------------ webcam watch
+
+    def _setup_webcam_watch(self) -> None:
+        """Watch the local CapabilityAccessManager registry for the Horizon client opening
+        the webcam (i.e. the VDI/Teams/Webex using your camera) → log + beep + Telegram."""
+        from src.telegram import TelegramNotifier
+        from src.webcam import WebcamWatcher
+
+        wcfg = self._config.get("webcam", {})
+        data_dir = Path(self._config.get("rag", {}).get("events_db", "./data/events.db")).parent
+        self._webcam_log_path = str(data_dir / "webcam_access.log")
+        self._webcam = WebcamWatcher(
+            capability="webcam",
+            match=tuple(wcfg.get("match", ["horizon"])),
+            log_path=self._webcam_log_path,
+            interval=float(wcfg.get("interval_seconds", 5)),
+        )
+        self._webcam_sig = _WebcamSignals()
+        self._webcam_sig.event.connect(self._on_webcam_event)
+        self._webcam_sig.log.connect(self.log)
+        self._webcam.on_event = self._webcam_sig.event.emit
+        self._webcam.on_log = self._webcam_sig.log.emit
+        self._webcam_tg = TelegramNotifier(
+            os.environ.get("TELEGRAM_BOT_TOKEN", ""), os.environ.get("TELEGRAM_CHAT_ID", "")
+        )
+
+        mp = self._monitor_page
+        mp.btn_webcam_log.clicked.connect(self._open_webcam_log)
+        mp.webcam_watch.toggled.connect(self._toggle_webcam_watch)
+        self._refresh_webcam_status()
+        if mp.webcam_watch.isChecked():
+            self._webcam.start()
+
+    def _refresh_webcam_status(self) -> None:
+        try:
+            la = self._webcam.last_access()
+        except Exception:  # noqa: BLE001
+            la = None
+        mp = self._monitor_page
+        if la is None:
+            mp.webcam_status.setText("No webcam access on record yet.")
+        elif la.kind in ("on", "in-use-at-start"):
+            mp.webcam_status.setText(f"⚠ Camera IN USE now by {la.app}.")
+        else:
+            mp.webcam_status.setText(
+                f"Last access: {la.app} on {la.when:%Y-%m-%d %H:%M}."
+            )
+
+    def _toggle_webcam_watch(self, on: bool) -> None:
+        if on:
+            self._webcam.start()
+            self.log("Webcam watch on.")
+        else:
+            self._webcam.stop()
+            self.log("Webcam watch off.")
+
+    def _on_webcam_event(self, ev) -> None:
+        mp = self._monitor_page
+        when = ev.when.strftime("%H:%M:%S")
+        if ev.kind in ("on", "in-use-at-start"):
+            verb = "in use" if ev.kind == "in-use-at-start" else "turned ON"
+            self.log(f"📷 Webcam {verb} — {ev.app} at {when}")
+            mp.webcam_status.setText(f"⚠ Camera IN USE by {ev.app} (since {when}).")
+            try:
+                import winsound
+                winsound.Beep(1200, 200)
+            except Exception:  # noqa: BLE001
+                from PySide6.QtWidgets import QApplication
+                QApplication.beep()
+            self._webcam_tg.notify_text(
+                f"📷 Webcam accessed by Horizon ({ev.app}) at {ev.when:%Y-%m-%d %H:%M}"
+            )
+        else:
+            dur = f" after {ev.duration_s:.0f}s" if ev.duration_s else ""
+            self.log(f"📷 Webcam OFF — {ev.app}{dur} at {when}")
+            mp.webcam_status.setText(
+                f"Last access: {ev.app} on {ev.when:%Y-%m-%d %H:%M}{dur}."
+            )
+
+    def _open_webcam_log(self) -> None:
+        path = getattr(self, "_webcam_log_path", None)
+        try:
+            if path and os.path.exists(path):
+                os.startfile(path)  # noqa: S606 — open the log in the default viewer
+            else:
+                self.log("No webcam log yet — it's written on the first access.")
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"Could not open the webcam log: {exc}")
 
     # ----------------------------------------------------- engine handlers
 

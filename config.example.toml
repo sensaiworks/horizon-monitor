@@ -49,6 +49,15 @@ match = ["Outlook"]
 name  = "Symphony"
 match = ["Symphony"]
 
+[webcam]
+# Privacy watch: alert + log when the Horizon client opens your LOCAL webcam (i.e. the
+# VDI / Teams / Webex using your camera via Real-Time Audio-Video redirection). Reads
+# Windows' per-app camera-usage registry — READ-ONLY, never changes camera state.
+# `match` = substrings of the using app's path; the VMware Horizon camera process is
+# horizon-protocol.exe, so "horizon" catches it. Toggle/log live on the Monitor tab.
+match            = ["horizon"]
+interval_seconds = 5
+
 [claude]
 vision_model = "claude-haiku-4-5-20251001"
 query_model  = "claude-sonnet-4-6"

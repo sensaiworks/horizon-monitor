@@ -55,6 +55,23 @@ class TelegramNotifier:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def notify_text(self, text: str) -> None:
+        """Fire-and-forget an arbitrary alert (e.g. a webcam-access notice).
+
+        For the app's own security/status alerts — NOT chat content; the presence-only
+        rule for *messages* still stands.
+        """
+        if not self.configured:
+            return
+
+        def worker() -> None:
+            try:
+                self._send(text)
+            except Exception as exc:  # noqa: BLE001
+                self.on_error(str(exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def send_test(self) -> tuple[bool, str]:
         """Synchronous test send. Returns (ok, human-readable detail)."""
         if not self.configured:

@@ -208,6 +208,29 @@ class MonitorPage(QWidget):
         ))
         body.addWidget(notify_card)
 
+        # Webcam access watch (privacy). Your webcam is redirected into the remote session,
+        # so the Horizon client opening it = the VDI/Teams/Webex using your camera.
+        cam_card, cam_lay = _card(
+            "Webcam access",
+            "Your webcam is redirected into the remote session, so a Teams/Webex call shows "
+            "up as the Horizon client opening it. Get alerted + logged whenever that happens "
+            "— so you'd notice any camera access you didn't start.",
+        )
+        cam_row = QHBoxLayout()
+        self.webcam_watch = QCheckBox("Watch & alert on Horizon webcam access")
+        self.webcam_watch.setChecked(True)
+        cam_row.addWidget(self.webcam_watch)
+        cam_row.addStretch(1)
+        self.btn_webcam_log = QPushButton("Open log")
+        self.btn_webcam_log.setMaximumWidth(110)
+        cam_row.addWidget(self.btn_webcam_log)
+        cam_lay.addLayout(cam_row)
+        self.webcam_status = QLabel("—")
+        self.webcam_status.setObjectName("Dim")
+        self.webcam_status.setWordWrap(True)
+        cam_lay.addWidget(self.webcam_status)
+        body.addWidget(cam_card)
+
         # Cooldown
         cd_card, cd_lay = _card("Don't spam me")
         cd_row = QHBoxLayout()
