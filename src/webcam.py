@@ -108,10 +108,11 @@ def scan(capability: str = "webcam", match: tuple[str, ...] = ("horizon",)) -> d
 
 @dataclass
 class WebcamEvent:
-    kind: str          # "on" | "off" | "in-use-at-start"
-    app: str           # friendly exe name
-    when: datetime     # local time of the transition
-    duration_s: float  # for "off": how long the camera was on (0 otherwise)
+    kind: str             # "on" | "off" | "in-use-at-start"
+    app: str              # friendly exe name
+    when: datetime        # local time of the transition
+    duration_s: float     # for "off": how long the device was on (0 otherwise)
+    device: str = "webcam"  # which capability — "webcam" | "microphone"
 
 
 class WebcamWatcher:
@@ -169,6 +170,7 @@ class WebcamWatcher:
                 app=_short_app(app),
                 when=_to_local(start) if in_use else when,
                 duration_s=0 if in_use else max(0.0, (stop - start) / 1e7),
+                device=self._cap,
             )
             if best is None or ev.when > best.when:
                 best = ev
@@ -181,13 +183,14 @@ class WebcamWatcher:
         cur = self._scan(self._cap, self._match)
         events: list[WebcamEvent] = []
 
+        dev = self._cap
         if not self._seeded:
             self._seeded = True
             self._prev = cur
             for app, (start, stop) in cur.items():
                 if start and stop == 0:
                     events.append(WebcamEvent("in-use-at-start", _short_app(app),
-                                              _to_local(start), 0))
+                                              _to_local(start), 0, dev))
             for ev in events:
                 self._emit(ev)
             return events
@@ -196,14 +199,14 @@ class WebcamWatcher:
             pstart, pstop = self._prev.get(app, (0, 0))
             in_use, was = (stop == 0 and start > 0), (pstop == 0 and pstart > 0)
             if in_use and not was:
-                events.append(WebcamEvent("on", _short_app(app), _to_local(start), 0))
+                events.append(WebcamEvent("on", _short_app(app), _to_local(start), 0, dev))
             elif was and not in_use:
                 events.append(WebcamEvent("off", _short_app(app), _to_local(stop),
-                                          max(0.0, (stop - start) / 1e7)))
+                                          max(0.0, (stop - start) / 1e7), dev))
             elif not in_use and not was and start > pstart > 0:
                 # A full on→off happened between polls (Windows kept only the last).
                 events.append(WebcamEvent("off", _short_app(app), _to_local(stop),
-                                          max(0.0, (stop - start) / 1e7)))
+                                          max(0.0, (stop - start) / 1e7), dev))
         self._prev = cur
         for ev in events:
             self._emit(ev)
@@ -236,7 +239,7 @@ class WebcamWatcher:
     def _append_log(self, ev: WebcamEvent) -> None:
         line = (
             f"{ev.when.strftime('%Y-%m-%d %H:%M:%S')}  "
-            f"{ev.kind.upper():16}{ev.app}"
+            f"{ev.kind.upper():16}{ev.device:11}{ev.app}"
             + (f"  ({ev.duration_s:.0f}s)" if ev.kind == 'off' and ev.duration_s else "")
         )
         try:

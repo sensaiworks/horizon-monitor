@@ -245,6 +245,7 @@ class MainWindow(QMainWindow):
                 "telegram": mp.telegram.isChecked(),
                 "beep": mp.beep.isChecked(),
                 "webcam": mp.webcam_watch.isChecked(),
+                "mic": mp.mic_watch.isChecked(),
                 "terms": [mp.terms.item(i).text() for i in range(mp.terms.count())],
             },
             "collect": {
@@ -267,6 +268,8 @@ class MainWindow(QMainWindow):
                 mp.beep.setChecked(bool(m["beep"]))
             if "webcam" in m:
                 mp.webcam_watch.setChecked(bool(m["webcam"]))
+            if "mic" in m:
+                mp.mic_watch.setChecked(bool(m["mic"]))
             mp.terms.clear()
             for t in m.get("terms") or []:
                 if str(t).strip():
@@ -283,7 +286,7 @@ class MainWindow(QMainWindow):
         mp, cp = self._monitor_page, self._collect_page
         for sig in (
             mp.enabled.toggled, mp.telegram.toggled, mp.beep.toggled,
-            mp.webcam_watch.toggled,
+            mp.webcam_watch.toggled, mp.mic_watch.toggled,
             cp.record.toggled, cp.collect_all.toggled, cp.channels.itemChanged,
         ):
             sig.connect(lambda *_: self._save_ui_state())
@@ -295,67 +298,90 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------ webcam watch
 
+    # Per-device display bits: emoji + the noun used in messages.
+    _AV = {"webcam": ("📷", "Camera"), "microphone": ("🎤", "Microphone")}
+
     def _setup_webcam_watch(self) -> None:
         """Watch the local CapabilityAccessManager registry for the Horizon client opening
-        the webcam (i.e. the VDI/Teams/Webex using your camera) → log + beep + Telegram."""
+        the camera AND microphone (i.e. the VDI/Teams/Webex using them) → log + beep +
+        Telegram. One watcher per device, both routed through the same handler."""
         from src.telegram import TelegramNotifier
         from src.webcam import WebcamWatcher
 
         wcfg = self._config.get("webcam", {})
+        match = tuple(wcfg.get("match", ["horizon"]))
+        interval = float(wcfg.get("interval_seconds", 5))
         data_dir = Path(self._config.get("rag", {}).get("events_db", "./data/events.db")).parent
-        self._webcam_log_path = str(data_dir / "webcam_access.log")
-        self._webcam = WebcamWatcher(
-            capability="webcam",
-            match=tuple(wcfg.get("match", ["horizon"])),
-            log_path=self._webcam_log_path,
-            interval=float(wcfg.get("interval_seconds", 5)),
-        )
-        self._webcam_sig = _WebcamSignals()
-        self._webcam_sig.event.connect(self._on_webcam_event)
-        self._webcam_sig.log.connect(self.log)
-        self._webcam.on_event = self._webcam_sig.event.emit
-        self._webcam.on_log = self._webcam_sig.log.emit
+        self._webcam_log_path = str(data_dir / "av_access.log")   # shared cam+mic log
+
+        self._av_sig = _WebcamSignals()
+        self._av_sig.event.connect(self._on_av_event)
+        self._av_sig.log.connect(self.log)
         self._webcam_tg = TelegramNotifier(
             os.environ.get("TELEGRAM_BOT_TOKEN", ""), os.environ.get("TELEGRAM_CHAT_ID", "")
         )
 
+        self._av_watchers: dict[str, WebcamWatcher] = {}
+        for cap in ("webcam", "microphone"):
+            w = WebcamWatcher(
+                capability=cap, match=match, log_path=self._webcam_log_path, interval=interval
+            )
+            w.on_event = self._av_sig.event.emit
+            w.on_log = self._av_sig.log.emit
+            self._av_watchers[cap] = w
+
         mp = self._monitor_page
         mp.btn_webcam_log.clicked.connect(self._open_webcam_log)
-        mp.webcam_watch.toggled.connect(self._toggle_webcam_watch)
+        mp.webcam_watch.toggled.connect(lambda on: self._toggle_av("webcam", on))
+        mp.mic_watch.toggled.connect(lambda on: self._toggle_av("microphone", on))
         self._refresh_webcam_status()
         if mp.webcam_watch.isChecked():
-            self._webcam.start()
+            self._av_watchers["webcam"].start()
+        if mp.mic_watch.isChecked():
+            self._av_watchers["microphone"].start()
 
     def _refresh_webcam_status(self) -> None:
-        try:
-            la = self._webcam.last_access()
-        except Exception:  # noqa: BLE001
-            la = None
+        """Show the most recent access across camera + mic on the status label."""
+        best = None
+        for w in getattr(self, "_av_watchers", {}).values():
+            try:
+                la = w.last_access()
+            except Exception:  # noqa: BLE001
+                la = None
+            if la and (best is None or la.when > best.when):
+                best = la
         mp = self._monitor_page
-        if la is None:
-            mp.webcam_status.setText("No webcam access on record yet.")
-        elif la.kind in ("on", "in-use-at-start"):
-            mp.webcam_status.setText(f"⚠ Camera IN USE now by {la.app}.")
+        if best is None:
+            mp.webcam_status.setText("No camera/mic access on record yet.")
+        elif best.kind in ("on", "in-use-at-start"):
+            noun = self._AV.get(best.device, ("", best.device))[1]
+            mp.webcam_status.setText(f"⚠ {noun} IN USE now by {best.app}.")
         else:
+            noun = self._AV.get(best.device, ("", best.device))[1]
             mp.webcam_status.setText(
-                f"Last access: {la.app} on {la.when:%Y-%m-%d %H:%M}."
+                f"Last {noun.lower()} access: {best.app} on {best.when:%Y-%m-%d %H:%M}."
             )
 
-    def _toggle_webcam_watch(self, on: bool) -> None:
+    def _toggle_av(self, cap: str, on: bool) -> None:
+        w = getattr(self, "_av_watchers", {}).get(cap)
+        if not w:
+            return
+        noun = self._AV.get(cap, ("", cap))[1]
         if on:
-            self._webcam.start()
-            self.log("Webcam watch on.")
+            w.start()
+            self.log(f"{noun} watch on.")
         else:
-            self._webcam.stop()
-            self.log("Webcam watch off.")
+            w.stop()
+            self.log(f"{noun} watch off.")
 
-    def _on_webcam_event(self, ev) -> None:
+    def _on_av_event(self, ev) -> None:
         mp = self._monitor_page
+        emoji, noun = self._AV.get(ev.device, ("🔔", ev.device))
         when = ev.when.strftime("%H:%M:%S")
         if ev.kind in ("on", "in-use-at-start"):
             verb = "in use" if ev.kind == "in-use-at-start" else "turned ON"
-            self.log(f"📷 Webcam {verb} — {ev.app} at {when}")
-            mp.webcam_status.setText(f"⚠ Camera IN USE by {ev.app} (since {when}).")
+            self.log(f"{emoji} {noun} {verb} — {ev.app} at {when}")
+            mp.webcam_status.setText(f"⚠ {noun} IN USE by {ev.app} (since {when}).")
             try:
                 import winsound
                 winsound.Beep(1200, 200)
@@ -363,13 +389,13 @@ class MainWindow(QMainWindow):
                 from PySide6.QtWidgets import QApplication
                 QApplication.beep()
             self._webcam_tg.notify_text(
-                f"📷 Webcam accessed by Horizon ({ev.app}) at {ev.when:%Y-%m-%d %H:%M}"
+                f"{emoji} {noun} accessed by Horizon ({ev.app}) at {ev.when:%Y-%m-%d %H:%M}"
             )
         else:
             dur = f" after {ev.duration_s:.0f}s" if ev.duration_s else ""
-            self.log(f"📷 Webcam OFF — {ev.app}{dur} at {when}")
+            self.log(f"{emoji} {noun} OFF — {ev.app}{dur} at {when}")
             mp.webcam_status.setText(
-                f"Last access: {ev.app} on {ev.when:%Y-%m-%d %H:%M}{dur}."
+                f"Last {noun.lower()} access: {ev.app} on {ev.when:%Y-%m-%d %H:%M}{dur}."
             )
 
     def _open_webcam_log(self) -> None:
