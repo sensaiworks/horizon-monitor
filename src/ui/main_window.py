@@ -277,8 +277,8 @@ class MainWindow(QMainWindow):
     # ---- worker-thread callbacks (arrive on the UI thread via _engine_sig)
 
     def _on_engine_status(self, state: str) -> None:
-        self._engine_state = "running" if state == "running" else (
-            "paused" if state == "paused" else "stopped"
+        self._engine_state = (
+            state if state in ("running", "paused", "starting") else "stopped"
         )
         self._refresh_engine()
         if state == "error":

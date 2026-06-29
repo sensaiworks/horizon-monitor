@@ -121,6 +121,11 @@ class CaptureEngine:
         self._stop_ev = asyncio.Event()
         self._pause_ev = asyncio.Event()
 
+        # Surface progress during the (potentially slow) setup so the UI doesn't look
+        # frozen on "Stopped" while stores connect and the remote MCP server spawns.
+        self._set_state("starting")
+        self.on_log("Opening stores…")
+
         extractor = Extractor(
             api_key=self._api_key,
             model=cfg["claude"]["vision_model"],
@@ -133,7 +138,7 @@ class CaptureEngine:
             voyage_api_key=os.environ.get("VOYAGE_API_KEY") or None,
             top_k=rag_cfg["top_k"],
         )
-        rag.connect()
+        rag.connect()   # fast now — the local embedding model loads lazily on first embed
         store = EventStore(rag_cfg.get("events_db", "./data/events.db"))
         store.connect()
 
@@ -155,6 +160,7 @@ class CaptureEngine:
         rotate = bool(cap.get("rotate", False))
         stitch = bool(targets) and control_on and rotate
 
+        self.on_log("Connecting to the remote (starting MCP server)…")
         async with HorizonMCPClient(
             server_path=cfg["mcp"]["server_path"], command=cfg["mcp"]["command"]
         ) as client:

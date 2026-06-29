@@ -38,11 +38,21 @@ class _VoyageEF(EmbeddingFunction):
 
 class _LocalEF(EmbeddingFunction):
     def __init__(self) -> None:
-        from sentence_transformers import SentenceTransformer
-        self._model = SentenceTransformer("all-MiniLM-L6-v2")
+        # Lazy: importing sentence_transformers pulls in torch and loads ~90 MB of model
+        # weights — tens of seconds, and the first run downloads them. Doing that in
+        # connect() froze startup before monitoring could begin, so defer it to the first
+        # actual embed (the first collected message) instead. Monitoring/alerts don't need
+        # it, so the loop reaches "running" immediately.
+        self._model = None
+
+    def _ensure_model(self):
+        if self._model is None:
+            from sentence_transformers import SentenceTransformer
+            self._model = SentenceTransformer("all-MiniLM-L6-v2")
+        return self._model
 
     def __call__(self, input: Documents) -> Embeddings:
-        return self._model.encode(list(input)).tolist()
+        return self._ensure_model().encode(list(input)).tolist()
 
 
 class RAGPipeline:

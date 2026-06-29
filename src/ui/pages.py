@@ -226,14 +226,19 @@ class MonitorPage(QWidget):
 
     def set_engine_state(self, state: str) -> None:
         """Reflect the capture engine's state in the control bar (pill + button enablement)."""
-        labels = {"running": "● Running", "paused": "⏸ Paused", "stopped": "○ Stopped"}
+        labels = {
+            "running": "● Running", "paused": "⏸ Paused",
+            "stopped": "○ Stopped", "starting": "◌ Starting…",
+        }
         color = STATUS_COLORS.get(state, COLORS["text_dim"])
         self.engine_pill.setText(labels.get(state, state))
         self.engine_pill.setStyleSheet(
             f"color: {color}; border: 1px solid {COLORS['border']};"
             f" border-radius: 11px; padding: 3px 10px; background: {COLORS['surface2']};"
         )
-        self.btn_start.setEnabled(state != "running")
+        # While starting/running the engine is live, so Start is disabled and Stop works;
+        # Pause only applies once fully running.
+        self.btn_start.setEnabled(state not in ("running", "starting"))
         self.btn_pause.setEnabled(state == "running")
         self.btn_stop.setEnabled(state != "stopped")
 
