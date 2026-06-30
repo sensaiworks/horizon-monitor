@@ -58,6 +58,20 @@ _INPUT_ACTIONS = {
     "type", "key", "hold_key", "scroll",
 }
 
+# Pointer/navigation actions — safe and reversible (they only move/focus/scroll), and their
+# confirmation description is just coordinates, which tells the user nothing. In the default
+# "guarded" approval level these run automatically; only typing/keys (which enter commands
+# and submit) are confirmed. Claude itself is told to pause before destructive UI.
+_SAFE_ACTIONS = {
+    "left_click", "right_click", "middle_click", "double_click", "triple_click",
+    "left_click_drag", "left_mouse_down", "left_mouse_up", "mouse_move", "scroll",
+}
+
+# Approval levels for ACT mode.
+APPROVAL_EVERY = "every"      # confirm every input action (most cautious)
+APPROVAL_GUARDED = "guarded"  # auto-approve pointer actions; confirm typing/keys (default)
+APPROVAL_ALL = "all"          # run freely — confirm nothing (Stop + self-guard still apply)
+
 # X11/xdotool-style keysyms (what the computer tool emits in `key`/`hold_key`) mapped to the
 # names horizon-mcp's key_combo expects. Best-effort — refine against a live session.
 _MODIFIERS = {
@@ -156,6 +170,7 @@ class ComputerUseAgent:
         self._stop = threading.Event()
         self._confirm_event = threading.Event()
         self._confirm_decision: str | None = None
+        self._approval = APPROVAL_GUARDED   # set per-turn by run_turn
 
         # Hooks.
         self.on_text: Callable[[str], None] = _noop
@@ -167,9 +182,16 @@ class ComputerUseAgent:
 
     # ------------------------------------------------------------- public API
 
-    def run_turn(self, user_text: str, mode: str = "advise") -> None:
-        """Run one user turn to completion (blocking — call from a worker thread)."""
+    def run_turn(
+        self, user_text: str, mode: str = "advise", approval: str = APPROVAL_GUARDED
+    ) -> None:
+        """Run one user turn to completion (blocking — call from a worker thread).
+
+        `approval` (ACT mode only): "every" confirms each input action, "guarded" (default)
+        auto-approves pointer actions and confirms typing/keys, "all" confirms nothing.
+        """
         self._stop.clear()
+        self._approval = approval
         try:
             asyncio.run(self._session(user_text, mode))
         except Exception as exc:  # surface, don't crash the UI thread
@@ -303,20 +325,25 @@ class ComputerUseAgent:
             )
 
         desc = self._describe(params)
-        decision = await asyncio.to_thread(self._request_confirmation, desc)
-        if decision == "stop":
-            self._stop.set()
-            self.on_result("Stopped.")
-            return "Stopped by the user.", False
-        if decision == "skip":
-            self.on_result(f"Skipped: {desc}")
-            return (
-                "The user declined this action (skipped). Do not retry it as-is — suggest a "
-                "different approach or ask the user how they'd like to proceed.",
-                False,
-            )
+        if self._needs_confirm(action):
+            decision = await asyncio.to_thread(self._request_confirmation, desc)
+            if decision == "stop":
+                self._stop.set()
+                self.on_result("Stopped.")
+                return "Stopped by the user.", False
+            if decision == "skip":
+                self.on_result(f"Skipped: {desc}")
+                return (
+                    "The user declined this action (skipped). Do not retry it as-is — "
+                    "suggest a different approach or ask the user how to proceed.",
+                    False,
+                )
+        else:
+            # Auto-approved (pointer action in guarded, or anything in 'all') — still
+            # surfaced so the user can follow along and Stop.
+            self.on_result(f"Auto: {desc}")
 
-        # Confirmed — perform it.
+        # Confirmed (or auto-approved) — perform it.
         try:
             outcome = await self._perform(params)
         except Exception as exc:
@@ -466,6 +493,15 @@ class ComputerUseAgent:
 
     # ----------------------------------------------------------- confirmation
 
+    def _needs_confirm(self, action: str) -> bool:
+        """Whether this input action needs the user's OK, per the approval level."""
+        if self._approval == APPROVAL_ALL:
+            return False
+        if self._approval == APPROVAL_EVERY:
+            return True
+        # guarded: confirm typing/keys (commands + submits); pointer actions run freely.
+        return action not in _SAFE_ACTIONS
+
     def _request_confirmation(self, desc: str) -> str:
         """Block the worker until the UI resolves the proposal (runs via asyncio.to_thread)."""
         if self._stop.is_set():
@@ -504,10 +540,11 @@ class ComputerUseAgent:
     def _system_prompt(self, mode: str) -> str:
         acting = mode == "act"
         mode_block = (
-            "MODE: ACT (hands-on). You may perform actions, but every input action "
-            "(click, type, key, scroll) is shown to the user for Confirm / Skip / Stop "
-            "before it runs. Take ONE action at a time, then screenshot and verify the "
-            "result before the next. Keep steps minimal and reversible."
+            "MODE: ACT (hands-on). You can drive the mouse and keyboard. Pointer actions "
+            "(click, scroll, move) may run automatically; typing and key presses may need "
+            "the user's confirmation, and the user can Stop at any time. Take ONE action at "
+            "a time, then screenshot and verify the result before the next. Keep steps "
+            "minimal and reversible."
             if acting else
             "MODE: ADVISE (read-only). You may take screenshots and zoom to SEE the screen, "
             "but you must NOT perform any input action — they are disabled and will be "
@@ -530,9 +567,12 @@ class ComputerUseAgent:
             "new one if it truly isn't open. Use zoom to read small text.\n\n"
             f"{mode_block}\n\n"
             "SAFETY — this is a real corporate machine:\n"
-            "- For anything destructive or hard to undo (deleting or discarding changes, "
-            "force/overwrite operations, closing without saving, sending a message, "
-            "git reset/checkout that drops work), STOP and ask the user first. Never assume.\n"
+            "- Pointer actions can run WITHOUT a prompt, so YOU are the guardrail for risk: "
+            "BEFORE any action that could lose work or is hard to undo — clicking Discard / "
+            "Delete / Don't Save / Force / Overwrite / Reset, confirming a destructive "
+            "dialog, running a git command that drops changes, or sending a message — STOP "
+            "and ASK the user first (end your turn, describing exactly what you would do). "
+            "Never assume.\n"
             "- Honor the user's explicit constraints exactly (e.g. 'do not stash').\n"
             "- Never type passwords or credentials.\n"
             "- If the screen is unexpected or you're unsure, ask the user rather than guessing.\n\n"

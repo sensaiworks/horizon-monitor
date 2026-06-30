@@ -20,7 +20,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QObject, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QButtonGroup, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QPlainTextEdit, QPushButton, QRadioButton, QScrollArea, QSpinBox,
     QVBoxLayout, QWidget,
 )
@@ -1349,8 +1349,10 @@ class _AssistSignals(QObject):
 class AssistPage(QWidget):
     """Direct help: describe a task, the agent looks at the remote screen and does it.
 
-    Advise mode is read-only (suggests the steps); Act mode performs them, confirming
-    every input action. Wraps src.assistant.ComputerUseAgent on a worker thread.
+    Advise mode is read-only (suggests the steps); Act mode performs them. The "Confirm"
+    selector controls Act's approval level — by default clicks/scrolls run automatically
+    and only typing/keys are confirmed; "Every step" confirms all; "run freely" confirms
+    nothing. Wraps src.assistant.ComputerUseAgent on a worker thread.
     """
 
     def __init__(self, config: dict, api_key: str) -> None:
@@ -1389,13 +1391,27 @@ class AssistPage(QWidget):
         mode_card, mode_lay = _card()
         mode_row = QHBoxLayout()
         self.mode_advise = QRadioButton("Advise (read-only)")
-        self.mode_act = QRadioButton("Act (perform, confirm each step)")
+        self.mode_act = QRadioButton("Act (hands-on)")
         self.mode_advise.setChecked(True)
         grp = QButtonGroup(self)
         grp.addButton(self.mode_advise)
         grp.addButton(self.mode_act)
         mode_row.addWidget(self.mode_advise)
         mode_row.addWidget(self.mode_act)
+        mode_row.addSpacing(10)
+        mode_row.addWidget(QLabel("Confirm:"))
+        self.act_approval = QComboBox()
+        self.act_approval.addItem("Typing & risky steps", "guarded")
+        self.act_approval.addItem("Every step", "every")
+        self.act_approval.addItem("Nothing — run freely", "all")
+        self.act_approval.setToolTip(
+            "In Act mode, clicks/scrolls run automatically (their coordinates tell you "
+            "nothing). This sets what still needs your OK. Either way, the assistant pauses "
+            "to ask before destructive actions, and Stop always works."
+        )
+        self.act_approval.setEnabled(False)
+        self.mode_act.toggled.connect(self.act_approval.setEnabled)
+        mode_row.addWidget(self.act_approval)
         mode_row.addStretch(1)
         self.new_btn = QPushButton("New session")
         self.new_btn.setMaximumWidth(120)
@@ -1485,6 +1501,7 @@ class AssistPage(QWidget):
         if not goal or self._running:
             return
         mode = "act" if self.mode_act.isChecked() else "advise"
+        approval = self.act_approval.currentData() or "guarded"
         self.input.clear()
         self._say("You", goal)
         self._set_status("Working…")
@@ -1493,7 +1510,9 @@ class AssistPage(QWidget):
         self.input.setEnabled(False)
         self.stop.setEnabled(True)
         agent = self._ensure_agent()
-        threading.Thread(target=agent.run_turn, args=(goal, mode), daemon=True).start()
+        threading.Thread(
+            target=agent.run_turn, args=(goal, mode, approval), daemon=True
+        ).start()
 
     def _stop_run(self) -> None:
         if self._agent is not None:
