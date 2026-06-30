@@ -17,7 +17,7 @@ import re
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QObject, Signal
+from PySide6.QtCore import Qt, QObject, QTimer, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
@@ -1139,6 +1139,37 @@ class SettingsPage(QWidget):
         notif = config.get("notifications", {})
         control = config.get("control", {})
 
+        # Models & cost — which models we call and the running session estimate.
+        from src.usage import TRACKER
+        cost_card, cost_lay = _card(
+            "Models & cost (this session)",
+            "Which Claude models the app calls, and a rough running estimate of what this "
+            "session has cost so far. Estimate only — verify against your Anthropic billing.",
+        )
+        cl = config.get("claude", {})
+        roles = [
+            ("Monitor (vision extract)", cl.get("vision_model", "claude-haiku-4-5")),
+            ("Ask (query)", cl.get("query_model", "claude-sonnet-4-6")),
+            ("Assist (computer-use)", config.get("assist", {}).get("model", "claude-opus-4-8")),
+        ]
+        lines = []
+        for role, mid in roles:
+            r = TRACKER.rate(mid)
+            price = f"${r[0]:g}/${r[1]:g} per 1M tok" if r else "price unknown"
+            lines.append(f"• {role}: {mid}  ({price})")
+        models_lbl = QLabel("\n".join(lines))
+        models_lbl.setObjectName("Dim")
+        models_lbl.setWordWrap(True)
+        cost_lay.addWidget(models_lbl)
+        self.usage_label = QLabel("No API calls yet this session.")
+        self.usage_label.setWordWrap(True)
+        cost_lay.addWidget(self.usage_label)
+        body.addWidget(cost_card)
+        self._usage_timer = QTimer(self)
+        self._usage_timer.timeout.connect(self._refresh_usage)
+        self._usage_timer.start(3000)   # cheap snapshot read; updates while the app runs
+        self._refresh_usage()
+
         # Monitoring
         mon_card, ml = _card("Monitoring")
         self.interval = self._spin(ml, "Poll interval", poll.get("interval_seconds", 3),
@@ -1202,6 +1233,26 @@ class SettingsPage(QWidget):
 
         body.addStretch(1)
         QVBoxLayout(self).addWidget(page)
+
+    def _refresh_usage(self) -> None:
+        from src.usage import TRACKER
+        snap = TRACKER.snapshot()
+        if not snap["models"]:
+            self.usage_label.setText("No API calls yet this session.")
+            return
+        parts = []
+        for m in snap["models"]:
+            name = m["model"].replace("claude-", "")
+            tin = m["input"] + m["cache_read"] + m["cache_write"]
+            cost = f"~${m['cost']:,.3f}" if m["priced"] else "price n/a"
+            parts.append(
+                f"{name}: {m['calls']} calls · {tin:,} in / {m['output']:,} out · {cost}"
+            )
+        parts.append(
+            f"— Total: {snap['total_calls']} calls · "
+            f"~${snap['total_cost']:,.3f} this session"
+        )
+        self.usage_label.setText("\n".join(parts))
 
     def _spin(self, layout, label, value, lo, hi, suffix) -> QSpinBox:
         row = QHBoxLayout()

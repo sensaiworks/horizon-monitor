@@ -102,6 +102,9 @@ class Extractor:
             ],
         )
 
+        from .usage import TRACKER
+        TRACKER.record(self._model, getattr(response, "usage", None))
+
         raw = response.content[0].text
         items, is_lock_screen = self._parse_response(raw)
         now = datetime.now(timezone.utc)

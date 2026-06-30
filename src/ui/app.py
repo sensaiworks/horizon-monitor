@@ -79,6 +79,16 @@ def run(config: dict, api_key: str) -> int:
     app.setQuitOnLastWindowClosed(False)  # closing the window must not kill the tray
     apply_theme(app)
 
+    # Optional [pricing] overrides for the cost estimate ({model = [in$, out$]} per 1M).
+    pricing = config.get("pricing")
+    if isinstance(pricing, dict):
+        from src.usage import TRACKER
+        TRACKER.set_pricing({
+            k: (float(v[0]), float(v[1]))
+            for k, v in pricing.items()
+            if isinstance(v, (list, tuple)) and len(v) == 2
+        })
+
     win = MainWindow(config, api_key)
     win._tray = _build_tray(app, win)  # keep a reference so it isn't GC'd
     win.show()

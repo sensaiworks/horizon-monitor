@@ -284,7 +284,7 @@ class ComputerUseAgent:
 
     def _create(self, tools: list[dict], mode: str):
         """One Messages API call (sync; runs in a worker via asyncio.to_thread)."""
-        return self._anthropic.beta.messages.create(
+        resp = self._anthropic.beta.messages.create(
             model=self._model,
             max_tokens=4096,
             system=self._system_prompt(mode),
@@ -294,6 +294,12 @@ class ComputerUseAgent:
             output_config={"effort": self._effort},
             thinking={"type": "adaptive"},
         )
+        try:
+            from .usage import TRACKER
+            TRACKER.record(self._model, getattr(resp, "usage", None))
+        except Exception:  # noqa: BLE001 — never let tracking break the agent loop
+            pass
+        return resp
 
     # ----------------------------------------------------------- action execution
 

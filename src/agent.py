@@ -73,6 +73,11 @@ class QueryAgent:
                 else:
                     print(text, end="", flush=True)
                 full_text += text
+            try:
+                from .usage import TRACKER
+                TRACKER.record(self._model, stream.get_final_message().usage)
+            except Exception:  # noqa: BLE001 — usage tracking must never break a query
+                pass
         if not on_chunk:
             print()
         return full_text

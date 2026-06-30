@@ -115,3 +115,10 @@ max_steps     = 20                 # max actions per turn — guards against run
 max_long_edge = 1568               # downscale screenshots to this long edge for the API
 effort        = "high"             # reasoning effort ("high" is best for computer use)
 focus_target  = "PVDI"             # local Horizon window to focus before sending input
+
+# [pricing]  — OPTIONAL. Overrides the Settings tab's cost estimate ($/1M tokens =
+# [input, output]). Built-in defaults match Anthropic's published rates as of 2026-06
+# (Haiku 4.5 $1/$5, Sonnet 4.6 $3/$15, Opus 4.8 $5/$25); set these only if rates change.
+# "claude-haiku-4-5-20251001" = [1.0, 5.0]
+# "claude-sonnet-4-6"         = [3.0, 15.0]
+# "claude-opus-4-8"           = [5.0, 25.0]
