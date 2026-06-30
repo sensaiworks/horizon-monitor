@@ -84,11 +84,14 @@ class UsageTracker:
         with self._lock:
             rows = []
             total_cost = 0.0
-            total_calls = 0
+            total_calls = total_input = total_output = 0
             for model, m in sorted(self._models.items()):
                 cost = self._cost(model, m)
                 total_cost += cost
                 total_calls += m["calls"]
+                tin = m["input"] + m["cache_read"] + m["cache_write"]
+                total_input += tin
+                total_output += m["output"]
                 rows.append({
                     "model": model,
                     "calls": m["calls"],
@@ -96,10 +99,18 @@ class UsageTracker:
                     "output": m["output"],
                     "cache_read": m["cache_read"],
                     "cache_write": m["cache_write"],
+                    "tokens_in": tin,
                     "cost": cost,
                     "priced": model in self._pricing,
                 })
-            return {"models": rows, "total_cost": total_cost, "total_calls": total_calls}
+            return {
+                "models": rows,
+                "total_cost": total_cost,
+                "total_calls": total_calls,
+                "total_input": total_input,
+                "total_output": total_output,
+                "total_tokens": total_input + total_output,
+            }
 
     def reset(self) -> None:
         with self._lock:

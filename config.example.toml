@@ -18,7 +18,7 @@ monitor_titles = ["PVDI", "horizon-client"]  # partial window title matches (cas
 # label, re-read each cycle so button drift doesn't matter), screenshots the whole VDI,
 # and captures it (per-app change detection). With rotate=false it just runs the
 # read-only passive monitor (no focus-stealing, no typing, no unlock).
-auto_start          = true
+auto_start          = false  # off by default — press Start yourself (avoids surprise API cost)
 # Keep rotate=false until you've calibrated the taskbar match terms below (test one with
 # `python main.py remote taskbar Symphony`). Then flip to true.
 rotate              = false

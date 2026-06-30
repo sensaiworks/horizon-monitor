@@ -1147,20 +1147,13 @@ class SettingsPage(QWidget):
             "session has cost so far. Estimate only — verify against your Anthropic billing.",
         )
         cl = config.get("claude", {})
-        roles = [
-            ("Monitor (vision extract)", cl.get("vision_model", "claude-haiku-4-5")),
-            ("Ask (query)", cl.get("query_model", "claude-sonnet-4-6")),
-            ("Assist (computer-use)", config.get("assist", {}).get("model", "claude-opus-4-8")),
-        ]
-        lines = []
-        for role, mid in roles:
-            r = TRACKER.rate(mid)
-            price = f"${r[0]:g}/${r[1]:g} per 1M tok" if r else "price unknown"
-            lines.append(f"• {role}: {mid}  ({price})")
-        models_lbl = QLabel("\n".join(lines))
-        models_lbl.setObjectName("Dim")
-        models_lbl.setWordWrap(True)
-        cost_lay.addWidget(models_lbl)
+        self.vision_model = self._model_combo(
+            cost_lay, "Monitor (vision):", cl.get("vision_model", "claude-haiku-4-5-20251001"))
+        self.query_model = self._model_combo(
+            cost_lay, "Ask (query):", cl.get("query_model", "claude-sonnet-4-6"))
+        self.assist_model = self._model_combo(
+            cost_lay, "Assist (computer-use):",
+            config.get("assist", {}).get("model", "claude-opus-4-8"))
         self.usage_label = QLabel("No API calls yet this session.")
         self.usage_label.setWordWrap(True)
         cost_lay.addWidget(self.usage_label)
@@ -1198,6 +1191,11 @@ class SettingsPage(QWidget):
         self.control_enabled = QCheckBox("Enable remote control (unlock, keep-awake, push)")
         self.control_enabled.setChecked(bool(control.get("enabled", False)))
         bl.addWidget(self.control_enabled)
+        self.auto_start = QCheckBox(
+            "Auto-start monitoring on launch (off = you press Start — avoids surprise cost)"
+        )
+        self.auto_start.setChecked(bool(config.get("capture", {}).get("auto_start", False)))
+        bl.addWidget(self.auto_start)
         body.addWidget(beh_card)
 
         # Secrets
@@ -1249,10 +1247,38 @@ class SettingsPage(QWidget):
                 f"{name}: {m['calls']} calls · {tin:,} in / {m['output']:,} out · {cost}"
             )
         parts.append(
-            f"— Total: {snap['total_calls']} calls · "
+            f"— Total: {snap['total_calls']} calls · {snap['total_tokens']:,} tokens "
+            f"({snap['total_input']:,} in / {snap['total_output']:,} out) · "
             f"~${snap['total_cost']:,.3f} this session"
         )
         self.usage_label.setText("\n".join(parts))
+
+    # Selectable models (cheapest → priciest), with their price shown in the dropdown.
+    _MODELS = [
+        ("claude-haiku-4-5-20251001", "Haiku 4.5"),
+        ("claude-sonnet-4-6", "Sonnet 4.6"),
+        ("claude-opus-4-8", "Opus 4.8"),
+    ]
+
+    def _model_combo(self, layout, label: str, current: str) -> QComboBox:
+        from src.usage import TRACKER
+        row = QHBoxLayout()
+        lbl = QLabel(label)
+        lbl.setMinimumWidth(170)
+        combo = QComboBox()
+        for mid, name in self._MODELS:
+            r = TRACKER.rate(mid)
+            price = f"  —  ${r[0]:g} / ${r[1]:g} per 1M" if r else ""
+            combo.addItem(f"{name}{price}", mid)
+        idx = combo.findData(current)
+        if idx < 0:                                   # a model not in our list — keep it
+            combo.addItem(f"{current} (custom)", current)
+            idx = combo.count() - 1
+        combo.setCurrentIndex(idx)
+        row.addWidget(lbl)
+        row.addWidget(combo, 1)
+        layout.addLayout(row)
+        return combo
 
     def _spin(self, layout, label, value, lo, hi, suffix) -> QSpinBox:
         row = QHBoxLayout()
@@ -1277,6 +1303,10 @@ class SettingsPage(QWidget):
             ("user", "display_name"): self.display_name.text().strip(),
             ("notifications", "cooldown_minutes"): self.cooldown.value(),
             ("control", "enabled"): self.control_enabled.isChecked(),
+            ("capture", "auto_start"): self.auto_start.isChecked(),
+            ("claude", "vision_model"): self.vision_model.currentData(),
+            ("claude", "query_model"): self.query_model.currentData(),
+            ("assist", "model"): self.assist_model.currentData(),
         }
         env_updates = {
             var: edit.text() for var, edit in self._env_edits.items() if edit.text()
