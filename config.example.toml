@@ -109,7 +109,8 @@ copy_timeout_seconds   = 6.0    # give up waiting for a copied file to arrive af
 # ADVISE mode is read-only — it only suggests the steps. ACT mode performs them, but
 # confirms every single input action (click / type / key / scroll) before it runs.
 model         = "claude-opus-4-8"  # vision + reasoning model for the agent loop
-screen        = 0                  # monitor index (from list_monitors) the VDI is on
+# (the VDI monitor is now auto-detected from the Horizon window rect — Assist captures the
+#  WHOLE VDI, even when it spans two monitors, and works in absolute coords. `screen` unused.)
 max_steps     = 20                 # max actions per turn — guards against runaways
 max_long_edge = 1568               # downscale screenshots to this long edge for the API
 effort        = "high"             # reasoning effort ("high" is best for computer use)

@@ -8,11 +8,13 @@ remote desktop (via horizon-mcp), Claude reasons over the pixels and emits an ac
 session, screenshot again, and repeat — exactly the "agent loop" from the computer-use docs.
 
 WHY computer use (not custom click tools): the model is purpose-trained for GUI grounding,
-so it locates the right element and returns pixel-accurate coordinates. horizon-mcp's
-screenshot/click/scroll all take a monitor `screen` index where coordinates are 0-based
-from that monitor's top-left — so the screenshot we send Claude and the click we send back
-share one coordinate frame. We downscale large screenshots to fit the API image limit and
-scale Claude's coordinates back to native before clicking.
+so it locates the right element and returns pixel-accurate coordinates. We capture the WHOLE
+VDI window (which can span two monitors) with screenshot_region in absolute virtual-desktop
+coordinates, downscale it to the API image limit, send it to Claude, then map Claude's
+coordinates back: undo the downscale and add the VDI rect's top-left offset to get an
+absolute coordinate, and click/scroll with NO monitor `screen` index. Using a single screen
+index instead would only ever see/click one half of a spanning VDI — a window on the other
+half would be invisible to the agent.
 
 TWO MODES (reliability + the user's read-only requirement):
   - ADVISE (default): read-only. Claude may screenshot/zoom to SEE the screen, but every
@@ -131,7 +133,11 @@ class ComputerUseAgent:
         assist = config.get("assist", {})
         ctl = config.get("control", {})
         self._focus_target = assist.get("focus_target", ctl.get("focus_target", "PVDI"))
-        self._screen = int(assist.get("screen", config.get("polling", {}).get("screen_index", 0)))
+        # The VDI's absolute on-screen rect (Left, Top, W, H), resolved on the first grab.
+        # The agent works over the WHOLE VDI in absolute virtual-desktop coordinates, because
+        # it can SPAN TWO MONITORS — a single screen index only ever sees/clicks one half, so
+        # a window on the other half is invisible to the agent (it would "not find" it).
+        self._rect: tuple[int, int, int, int] = (0, 0, 0, 0)
         self._max_steps = int(assist.get("max_steps", 20))
         self._max_long_edge = int(assist.get("max_long_edge", 1568))
         self._effort = assist.get("effort", "high")
@@ -331,17 +337,19 @@ class ComputerUseAgent:
             # NOTE: a modifier in params["text"] (shift/ctrl+click) is not honored —
             # horizon-mcp can't hold a key *during* a click, so we perform a plain click
             # rather than send a stray keystroke. Revisit if modified clicks are needed.
+            # Absolute virtual-desktop coords (no `screen`) so the click lands on the right
+            # monitor when the VDI spans two.
             if action == "right_click":
-                await c.click(x, y, button="right", screen=self._screen)
+                await c.click(x, y, button="right")
             elif action == "middle_click":
-                await c.click(x, y, button="middle", screen=self._screen)
+                await c.click(x, y, button="middle")
             elif action == "double_click":
-                await c.double_click(x, y, screen=self._screen)
+                await c.double_click(x, y)
             elif action == "triple_click":
                 for _ in range(3):
-                    await c.click(x, y, screen=self._screen)
+                    await c.click(x, y)
             else:  # left_click / left_click_drag (drag falls back to a click)
-                await c.click(x, y, screen=self._screen)
+                await c.click(x, y)
             return f"Clicked at ({x}, {y})."
 
         if action == "mouse_move":
@@ -365,7 +373,7 @@ class ComputerUseAgent:
             x, y = self._to_native(params["coordinate"])
             direction = params.get("scroll_direction", "down")
             amount = int(params.get("scroll_amount", 3) or 3)
-            await c.scroll(x, y, direction, amount, screen=self._screen)
+            await c.scroll(x, y, direction, amount)   # absolute coords
             return f"Scrolled {direction} {amount} at ({x}, {y})."
 
         return f"Unsupported action: {action}"
@@ -379,12 +387,17 @@ class ComputerUseAgent:
     # ----------------------------------------------------------- screenshots
 
     async def _grab_display(self, first: bool = False) -> str:
-        """Screenshot the VDI monitor, downscale to the image limit, return base64 PNG.
+        """Screenshot the WHOLE VDI window, downscale to the image limit, return base64 PNG.
 
-        On the first grab of a turn this also fixes the display dimensions and scale factor
-        used for the tool definition and all coordinate mapping for the turn.
+        Captures the full VDI rect (both monitors it may span) in absolute virtual-desktop
+        coordinates, so the agent sees everything. On the first grab of a turn this resolves
+        the rect and fixes the display dimensions + scale factor used for the tool definition
+        and all coordinate mapping for the turn.
         """
-        png = await self._client.screenshot(screen=self._screen)
+        if first:
+            self._rect = await self._controller.resolve_rect()
+        left, top, w, h = self._rect
+        png = await self._client.screenshot_region(left, top, w, h)
         img = Image.open(io.BytesIO(png)).convert("RGB")
         nat_w, nat_h = img.size
         if first:
@@ -395,12 +408,15 @@ class ComputerUseAgent:
         return self._encode(disp)
 
     async def _grab_zoom(self, region: Any) -> str:
-        """Crop a region (in display coords) from a fresh native screenshot, at full detail."""
-        png = await self._client.screenshot(screen=self._screen)
+        """Crop a region (in display coords) from a fresh VDI screenshot, at full detail."""
+        left, top, w, h = self._rect
+        png = await self._client.screenshot_region(left, top, w, h)
         img = Image.open(io.BytesIO(png)).convert("RGB")
         if region and len(region) == 4:
-            x1, y1 = self._to_native([region[0], region[1]])
-            x2, y2 = self._to_native([region[2], region[3]])
+            # Region is display-space → image-local pixels (no virtual-desktop offset here,
+            # since we're cropping within the region image whose origin is the VDI top-left).
+            x1, y1 = self._to_image([region[0], region[1]])
+            x2, y2 = self._to_image([region[2], region[3]])
             x1, x2 = sorted((max(0, x1), min(img.width, x2)))
             y1, y2 = sorted((max(0, y1), min(img.height, y2)))
             if x2 > x1 and y2 > y1:
@@ -418,11 +434,21 @@ class ComputerUseAgent:
         img.save(buf, format="PNG")
         return base64.b64encode(buf.getvalue()).decode("ascii")
 
-    def _to_native(self, coord: Any) -> tuple[int, int]:
-        """Map display-space coordinates from Claude back to native screen pixels."""
-        x, y = coord[0], coord[1]
+    def _to_image(self, coord: Any) -> tuple[int, int]:
+        """Display-space → pixel within the VDI screenshot (no virtual-desktop offset)."""
         s = self._scale or 1.0
-        return round(x / s), round(y / s)
+        return round(coord[0] / s), round(coord[1] / s)
+
+    def _to_native(self, coord: Any) -> tuple[int, int]:
+        """Display-space coordinates from Claude → ABSOLUTE virtual-desktop pixels.
+
+        Undo the downscale, then add the VDI rect's (Left, Top) so the coordinate addresses
+        the right monitor when the VDI spans two. Pass straight to click()/scroll() with NO
+        `screen` index (absolute coords).
+        """
+        ix, iy = self._to_image(coord)
+        left, top, _, _ = self._rect
+        return ix + left, iy + top
 
     @staticmethod
     def _image_block(b64: str) -> dict:
@@ -497,6 +523,11 @@ class ComputerUseAgent:
             "Microsoft Teams, Symphony, etc.) are pixels inside the VDI — not separate OS "
             "windows. Locate the right window visually and click it to focus before typing "
             "into it.\n\n"
+            "The remote desktop may SPAN TWO MONITORS, so the screenshot is wide: scan the "
+            "WHOLE width (both halves). Before launching an app, check whether it is ALREADY "
+            "open somewhere on screen (e.g. a Git Bash / MINGW64 window may already be on the "
+            "other half) and reuse that window instead of opening a new one; only launch a "
+            "new one if it truly isn't open. Use zoom to read small text.\n\n"
             f"{mode_block}\n\n"
             "SAFETY — this is a real corporate machine:\n"
             "- For anything destructive or hard to undo (deleting or discarding changes, "
