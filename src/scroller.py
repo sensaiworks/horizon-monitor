@@ -48,28 +48,40 @@ def lines_sorted(ocr: Any) -> list[dict]:
     return sorted(lines, key=lambda l: (l.get("y", 0), l.get("x", 0)))
 
 
+def _name_lines(lines: list[dict]) -> list[dict]:
+    """Lines that start with a "Last, First" sender name — real chat headers that are
+    NEVER inside an embedded image/table, so the wheel over them is never eaten."""
+    return [l for l in lines if _NAME.match(l.get("text", "").strip())]
+
+
+def _target_point(line: dict, pane: tuple[int, int, int, int]) -> tuple[int, int]:
+    px = pane[0]
+    return line.get("x", px) + min(line.get("width", 40), 140) // 2, line.get("y", pane[1])
+
+
 def pick_scroll_target(lines: list[dict], pane: tuple[int, int, int, int],
                        fallback: tuple[int, int]) -> tuple[int, int]:
-    """A point over real TEXT (a sender header / short left-aligned line) to wheel on.
+    """A point over real TEXT to wheel on — STRONGLY preferring a sender-name line.
 
     Scrolling over an embedded image/table or dead space does nothing (the wheel is
-    eaten), so aim at a text line — present in almost every frame and always scrollable.
+    eaten). Sender names ("Last, First …") are never image content, so we aim at the
+    one nearest the pane centre. Only when no name is visible do we fall back to a
+    generic short left-aligned line — which CAN be image text, so it's a last resort.
     """
     px, py, pw, ph = pane
     cy = py + ph // 2
 
-    def safe(l: dict) -> bool:
+    def generic(l: dict) -> bool:
         t = l.get("text", "").strip()
         x, w = l.get("x", 0), l.get("width", 0)
-        return (bool(_NAME.match(t)) or
-                (x < px + 320 and w < 340 and re.search(r"[A-Za-z]", t)
-                 and not re.search(r"\d{4,}", t)))
+        return (x < px + 320 and w < 340 and re.search(r"[A-Za-z]", t)
+                and not re.search(r"\d{4,}", t))
 
-    cands = [l for l in lines if safe(l)]
+    cands = _name_lines(lines) or [l for l in lines if generic(l)]
     if not cands:
         return fallback
     best = min(cands, key=lambda l: abs(l.get("y", 0) - cy))
-    return best.get("x", px) + min(best.get("width", 40), 140) // 2, best.get("y", cy)
+    return _target_point(best, pane)
 
 
 def measure_displacement(prev_lines: list[dict], cur_lines: list[dict],
@@ -207,14 +219,19 @@ class AdaptiveScroller:
         return raw, cur, disp
 
     async def nudge_hard(self, client, direction: str = "up") -> tuple[str, list[dict], int | None]:
-        """A deliberately large burst at the pane's top/bottom edge — used to shake a
-        stall loose (Teams lazy-loads older messages when you hit the very top)."""
+        """A deliberately large burst to shake a stall loose — aimed at the sender name
+        nearest the leading edge (real text, never an image) so the wheel isn't eaten;
+        this also hits the top/bottom where Teams lazy-loads more messages."""
         px, py, pw, ph = self.pane
-        edge_y = py + 60 if direction == "up" else py + ph - 60
-        tx, _ = pick_scroll_target(self.prev_lines, self.pane, (px + pw // 2, edge_y))
-        await client.move_mouse(tx, edge_y, screen=self.screen)
+        names = _name_lines(self.prev_lines)
+        if names:
+            anchor = (min if direction == "up" else max)(names, key=lambda l: l.get("y", 0))
+            tx, ty = _target_point(anchor, self.pane)
+        else:
+            tx, ty = px + pw // 2, (py + 60 if direction == "up" else py + ph - 60)
+        await client.move_mouse(tx, ty, screen=self.screen)
         for _ in range(self.max_pulses):
-            await client.scroll(tx, edge_y, direction, amount=self.base_amount, screen=self.screen)
+            await client.scroll(tx, ty, direction, amount=self.base_amount, screen=self.screen)
             await client.wait(self.pulse_wait_ms)
         await client.wait(self.settle_ms)
         raw, cur = await self._ocr(client)

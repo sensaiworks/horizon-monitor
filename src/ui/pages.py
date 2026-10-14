@@ -20,9 +20,9 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QObject, QTimer, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QPlainTextEdit, QPushButton, QRadioButton, QScrollArea, QSpinBox,
-    QVBoxLayout, QWidget,
+    QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton, QRadioButton, QScrollArea,
+    QSpinBox, QVBoxLayout, QWidget,
 )
 
 from .theme import COLORS, STATUS_COLORS
@@ -1198,6 +1198,34 @@ class SettingsPage(QWidget):
         bl.addWidget(self.auto_start)
         body.addWidget(beh_card)
 
+        # Pulled files (src/pull.py) — where `python main.py pull` writes files it
+        # printer-redirects out of the remote. Kept OUTSIDE any git repo on purpose.
+        pull_cfg = config.get("pull", {})
+        pull_card, pcl = _card(
+            "Pulled files",
+            "Where files pulled out of the remote (via the printer-redirection channel) "
+            "land. A plain folder outside any git repo — open it directly in VS Code to "
+            "review or keep working on what you pulled.",
+        )
+        root_row = QHBoxLayout()
+        root_row.addWidget(QLabel("Root folder:"))
+        self.pull_root = QLineEdit(pull_cfg.get("root_dir", ""))
+        self.pull_root.setPlaceholderText(r"C:\github\Mizuho")
+        root_row.addWidget(self.pull_root, 1)
+        browse_btn = QPushButton("Browse…")
+
+        def _browse_root() -> None:
+            chosen = QFileDialog.getExistingDirectory(
+                self, "Choose pulled-files folder", self.pull_root.text() or str(Path.home())
+            )
+            if chosen:
+                self.pull_root.setText(str(Path(chosen)))
+
+        browse_btn.clicked.connect(_browse_root)
+        root_row.addWidget(browse_btn)
+        pcl.addLayout(root_row)
+        body.addWidget(pull_card)
+
         # Secrets
         sec_card, scl = _card(
             "Credentials (.env)",
@@ -1304,6 +1332,7 @@ class SettingsPage(QWidget):
             ("notifications", "cooldown_minutes"): self.cooldown.value(),
             ("control", "enabled"): self.control_enabled.isChecked(),
             ("capture", "auto_start"): self.auto_start.isChecked(),
+            ("pull", "root_dir"): self.pull_root.text().strip(),
             ("claude", "vision_model"): self.vision_model.currentData(),
             ("claude", "query_model"): self.query_model.currentData(),
             ("assist", "model"): self.assist_model.currentData(),

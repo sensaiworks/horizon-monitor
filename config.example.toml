@@ -1,6 +1,13 @@
 [mcp]
 server_path = "C:\\path\\to\\horizon-mcp\\dist\\index.js"  # absolute path to compiled MCP server
 command     = "node"
+# Hard per-tool-call timeout. The MCP stdio SDK waits for a response FOREVER, so a
+# single lost reply wedges any caller silently -- field-tested 2026-08-24, a
+# pull-payload run sat blocked for an hour mid-print with 0% CPU, no error and no log
+# line. 90s means "never coming back" (a 2-monitor screenshot is normally <10s), not
+# "slow". Read-only tools (screenshot/ocr/list_*) retry once; input-sending tools
+# never do, since a timed-out click may already have landed.
+call_timeout_seconds = 90.0
 
 [polling]
 interval_seconds  = 3
@@ -137,6 +144,90 @@ stall_wait_ms   = 2600             # extra wait on a stall so Teams can fetch ol
 stall_limit     = 8                # near-zero-move frames in a row before we call it the top
 max_frames      = 700              # safety cap on total frames
 months          = 6                # stop once messages older than this many months appear
+
+[pull]
+# Pull source files out of the remote via the printer-redirection channel (src/pull.py)
+# -- for VDIs that block clipboard copy-out, where controller.copy_from_remote() can't
+# work at all. Prints each file from Notepad to a local PDF via a Horizon-redirected
+# virtual printer, then reconstructs the source text locally (no further VDI I/O).
+# Requires `pdftotext` (poppler) on PATH, and drives the remote, so also needs
+# [control].enabled = true.
+# RETIRED as a batch transport (see DECISIONS.md) -- reconstructing indentation from
+# a printed page is a guess, and it needs one fragile print job per file. Kept only
+# as a single-file, human-reviewed last resort. For a whole project, use
+# `pull-payload` / [pull_payload] below instead -- it's byte-exact, verified by
+# SHA-256, and needs at most a handful of print jobs regardless of file count.
+# root_dir: where pulled files land, OUTSIDE this (or any) git repo -- a plain folder
+# meant to be opened directly in VS Code to review/keep working on what you pulled.
+# `python main.py pull ... --project PAT` groups a project under root_dir/PAT/ instead
+# of dropping everything flat into root_dir. Also editable from the Settings tab.
+root_dir              = "C:\\github\\Mizuho"
+printer_name          = "Microsoft Print to PDF"  # substring match on the print dialog's printer name
+# Where to click to focus an open Explorer window's address bar (Ctrl+L/F4 were
+# field-tested live and don't reliably reach this VDI, same class of gap as Win+R).
+# Screenshot the VDI once and read these off your own window if they don't match.
+address_bar_x         = 1030
+address_bar_y         = 295
+address_bar_screen    = 0
+open_wait_seconds     = 1.5   # after launching Notepad, before touching the View/Print menus
+print_wait_seconds    = 0.8   # after Ctrl+P, before reading the dialog
+save_wait_seconds     = 1.2   # after clicking Print, before the Save dialog is interacted with
+save_poll_seconds     = 0.5   # how often to check whether the output PDF has stopped growing
+save_timeout_seconds  = 20.0  # give up waiting for the PDF to land after this
+# `python main.py pull-project NAME --root "C:\..."` (src/remote_tree.py): discovers
+# a WHOLE remote project's file tree (robocopy /L, falling back to `dir /s`) instead
+# of pulling one hand-typed path at a time, and tracks a manifest at
+# root_dir/NAME/.horizon_pull_manifest.json so re-running later only pulls what's
+# new/changed on the remote -- on-demand sync, nothing here runs automatically.
+tree_wait_seconds     = 4.0   # after kicking off the listing command, before pulling its output
+# Every pull action focuses the LOCAL Horizon window first, which can steal your
+# mouse/keyboard. The moment real input is detected on this PC (Windows
+# GetLastInputInfo -- same mechanism the auto-monitor rotation already uses), the
+# pull pauses and waits until you've been idle again for this long before continuing.
+yield_resume_seconds  = 30.0
+
+[pull_payload]
+# Byte-exact whole-project pull (src/pull_payload.py, `python main.py pull-payload
+# PROJECT --root "C:\..."`) -- the pivot DECISIONS.md names to replace the old
+# per-file pull above. A remote PowerShell script (src/remote_scripts/
+# project_archive.ps1) zips the project, base64-encodes the zip, and writes it as one
+# or a few chunked, SHA-256-verified text files; those get printed via the SAME
+# print_to_pdf() as [pull] above (reused unchanged), then decoded and verified
+# locally. Needs [control].enabled = true and `pdftotext` on PATH, same as [pull].
+# Same root_dir/address_bar_*/open_wait_seconds/print_wait_seconds/save_wait_seconds/
+# save_poll_seconds/save_timeout_seconds/printer_name/yield_resume_seconds knobs above
+# are reused for the printing step -- nothing to duplicate here.
+#
+# VERIFIED LIVE 2026-08-18 against "Pricing Tool" with exactly the values below:
+# 11 files (incl. .xlsx/.PNG binaries), 1,469,364 zip bytes -> 10 export files, ~1.9
+# min per print job, ~20 min total, every hash clean. Treat these as the known-good
+# baseline; change one at a time and re-measure.
+#
+# max_chars_per_file is THE reliability knob. Printing is the only slow, GUI-driven,
+# open-loop step, so the number of print jobs (= base64 length / this value) is the
+# number of chances to fail. Raising it trades more print jobs for bigger ones:
+#     print jobs ~= ceil(zip_bytes * 4/3 / max_chars_per_file)
+# 200000 gave 10 jobs for a 1.4 MB project; 1000000 would give 2. Untested above
+# 200000 -- when calibrating, use the CLI override rather than editing this file
+# (`--max-chars-per-file 500000`), and watch for a Notepad open/print that outruns
+# [pull].save_timeout_seconds on the bigger file. A failed run is no longer fatal:
+# re-run with --resume and only the unverified export files are reprinted.
+chunk_chars             = 4000     # base64 characters per SHA-256-verified chunk
+max_chars_per_file      = 200000   # split into part_002.txt, ... beyond this per file
+# Any single source file over this is SKIPPED -- it is listed in the _contents.txt
+# that rides back inside the zip, and the run ends with a completeness warning naming
+# it, so a skip is loud rather than silent. Raise it if a real asset is being dropped.
+max_file_bytes          = 5242880  # skip (and report) any single source file over 5 MB
+staging_dir_name        = "_archive"  # remote dir name, sibling of the project root
+manifest_poll_seconds   = 6.0    # how often to check whether the export script finished
+manifest_timeout_seconds = 300.0 # give up waiting for the export script after this
+# exclude_dirs = [".git", "node_modules", "__pycache__", ".venv"]  # override the
+# default (same list as [pull]'s remote_tree.py discovery) if left unset.
+# NB the default list includes bin/build/dist/obj/Lib/python/site-packages. If YOUR
+# project has real source in a directory with one of those names it would be erased
+# silently -- so the export now counts files dropped per rule and prints them at the
+# end of every run ("excluded by dir rule (files): build=41"). If you see a count you
+# didn't expect, set this key explicitly rather than accepting the default.
 
 # [pricing]  — OPTIONAL. Overrides the Settings tab's cost estimate ($/1M tokens =
 # [input, output]). Built-in defaults match Anthropic's published rates as of 2026-06

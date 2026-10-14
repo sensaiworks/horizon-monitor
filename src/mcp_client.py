@@ -18,6 +18,7 @@ through RemoteController behind the opt-in [control] config flag.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from typing import Any
@@ -31,9 +32,18 @@ from .models import ProcessInfo
 class HorizonMCPClient:
     """Manages a long-lived connection to the horizon-mcp stdio server."""
 
-    def __init__(self, server_path: str, command: str = "node") -> None:
+    # Generous by design: a `screenshot` of a 2-monitor VDI plus ~300ms of
+    # PowerShell startup is normally well under 10s, so 90s means "this call is
+    # never coming back", not "this call is slow". See _call's docstring.
+    DEFAULT_CALL_TIMEOUT_SECONDS = 90.0
+
+    def __init__(
+        self, server_path: str, command: str = "node",
+        call_timeout_seconds: float = DEFAULT_CALL_TIMEOUT_SECONDS,
+    ) -> None:
         self._server_path = server_path
         self._command = command
+        self._call_timeout = call_timeout_seconds
         self._session: ClientSession | None = None
         self._cm = None
 
@@ -55,12 +65,54 @@ class HorizonMCPClient:
         if self._cm:
             await self._cm.__aexit__(*exc)
 
+    # Tools that only OBSERVE. Safe to retry after a timeout because running one
+    # twice is indistinguishable from running it once. Anything that sends input
+    # (click/type_text/press_key/key_combo/paste_text/scroll/...) is deliberately
+    # NOT in here: a timed-out click may well have landed, and re-sending it would
+    # double-click a button or type a command twice into the remote.
+    _IDEMPOTENT_TOOLS = frozenset({
+        "screenshot", "screenshot_region", "screenshot_window", "ocr",
+        "list_windows", "list_monitors", "get_window_rect",
+        "get_foreground_window", "get_clipboard", "get_pixel_color",
+    })
+
     async def _call(self, tool: str, **kwargs: Any) -> Any:
+        """Invoke one MCP tool, with a HARD timeout.
+
+        The timeout is not defensive boilerplate -- it is load-bearing. The stdio
+        SDK's call_tool() waits for a response forever, so a single lost/never-sent
+        reply wedges the whole caller with no error, no log line and no CPU use.
+        Field-tested the hard way 2026-08-24: a `pull-payload` run sat blocked for a
+        full hour mid-print (0.000s CPU over 12s, no MCP child process alive, the
+        remote left sitting on an open Print dialog). Nothing above could recover,
+        because `manifest_timeout_seconds` and every other guard only get evaluated
+        BETWEEN tool calls, never during one.
+
+        Converting that hang into a bounded exception is what makes the layers above
+        work as designed: pull_payload's manifest poll retries, and a failed print
+        surfaces as a normal error whose PDFs `--resume` can pick up.
+        """
         assert self._session, "Client not connected — use async with"
         # Drop None kwargs so optional server params fall back to their defaults.
         args = {k: v for k, v in kwargs.items() if v is not None}
-        result = await self._session.call_tool(tool, arguments=args)
-        return result
+        attempts = 2 if tool in self._IDEMPOTENT_TOOLS else 1
+        for attempt in range(1, attempts + 1):
+            try:
+                return await asyncio.wait_for(
+                    self._session.call_tool(tool, arguments=args),
+                    timeout=self._call_timeout,
+                )
+            except (asyncio.TimeoutError, TimeoutError) as exc:
+                if attempt < attempts:
+                    continue
+                raise TimeoutError(
+                    f"horizon-mcp tool {tool!r} did not respond within "
+                    f"{self._call_timeout:g}s"
+                    + (f" (retried {attempts}x)" if attempts > 1 else "")
+                    + ". The MCP server or its PowerShell child is wedged; the "
+                    "remote session was left mid-action, so check it by hand before "
+                    "re-running."
+                ) from exc
 
     @staticmethod
     def _first_text(result: Any) -> str:
@@ -196,6 +248,12 @@ class HorizonMCPClient:
         Width, Height, Screen, Device). `Screen` is the monitor index it's mostly on —
         the value to pass as `screen` to the spatial tools. Raises on parse failure."""
         return json.loads(self._first_text(await self._call("get_window_rect", target=target)))
+
+    async def list_monitors(self) -> list[dict]:
+        """Return [{index, device, primary, x, y, width, height, dpi, scale}, ...] —
+        `index` is the value to pass as `screen` elsewhere; x,y are that monitor's
+        top-left in absolute virtual-desktop pixels. Raises on parse failure."""
+        return json.loads(self._first_text(await self._call("list_monitors")))
 
     async def ocr(
         self,

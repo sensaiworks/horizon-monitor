@@ -19,3 +19,4 @@ build/
 .ruff_cache/
 *.log
 secrets/
+scripts/portable-secrets.ps1

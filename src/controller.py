@@ -28,6 +28,22 @@ import json
 from .mcp_client import HorizonMCPClient
 
 
+def _shift_ocr_box(line: dict, ox: int, oy: int) -> dict:
+    """Return `line` (an OCR {text,x,y,width,height,words} dict) with its own box and
+    every word's box shifted by (ox, oy) — converts a screen-local OCR result to
+    absolute virtual-desktop coordinates."""
+    shifted = dict(line)
+    if "x" in shifted:
+        shifted["x"] = shifted["x"] + ox
+    if "y" in shifted:
+        shifted["y"] = shifted["y"] + oy
+    shifted["words"] = [
+        {**w, "x": w["x"] + ox, "y": w["y"] + oy} if "x" in w and "y" in w else w
+        for w in (line.get("words") or [])
+    ]
+    return shifted
+
+
 def _merge_overlap(acc: list[str], new: list[str]) -> int:
     """Append the non-overlapping tail of `new` onto `acc` in place; return lines added.
 
@@ -75,6 +91,7 @@ class RemoteController:
         # is kept only as a legacy fallback origin if the window rect can't be read.
         self._screen = screen
         self._rect: tuple[int, int, int, int] | None = None
+        self._monitors: list[dict] | None = None
         # How long redirection takes to sync the clipboard between local and remote,
         # and how long to wait for a copied file to arrive before giving up.
         self._clipboard_sync = clipboard_sync
@@ -109,6 +126,24 @@ class RemoteController:
             self._rect = (0, 0, 1920, 1080)
         return self._rect
 
+    async def _monitors_in_rect(
+        self, rect: tuple[int, int, int, int]
+    ) -> list[dict]:
+        """List monitors (list_monitors() shape) that intersect `rect`, cached after
+        the first lookup (the physical monitor layout doesn't change mid-session)."""
+        if self._monitors is None:
+            try:
+                self._monitors = await self._client.list_monitors()
+            except Exception:  # noqa: BLE001 — caller falls back to the whole rect
+                self._monitors = []
+        left, top, w, h = rect
+        right, bottom = left + w, top + h
+        return [
+            m for m in self._monitors
+            if m["x"] < right and m["x"] + m["width"] > left
+            and m["y"] < bottom and m["y"] + m["height"] > top
+        ]
+
     # alias used by the tray / CLI when the user just wants the window up front
     async def bring_to_front(self) -> None:
         await self.ensure_foreground()
@@ -132,23 +167,122 @@ class RemoteController:
         except (KeyError, TypeError):
             return None
 
-    async def find_text_point(self, needle: str) -> tuple[int, int] | None:
-        """OCR the VDI and return the ABSOLUTE click point of the first line containing
+    async def find_text_point(
+        self, needle: str, *, taskbar_only: bool = False, taskbar_height: int = 56,
+        top_only: bool = False, top_height: int = 300, skip_top: int = 0,
+    ) -> tuple[int, int] | None:
+        """OCR the VDI and return the ABSOLUTE click point of the best match for
         `needle`.
 
-        OCR runs over the whole VDI rectangle in absolute virtual-desktop coordinates, so
-        the returned box is absolute and can be passed straight to click() with NO
-        `screen` — the only frame that works when the VDI spans monitors. Returns None if
-        not found / OCR fails.
+        Tries, in order: (1) a LINE whose full text exactly equals `needle`, (2) a WORD
+        within any line that exactly equals `needle`, (3) the first line CONTAINING
+        `needle` as a substring. The exact passes run first because a naive substring
+        search picks up unrelated matches that happen to appear earlier in OCR's
+        reading order — e.g. searching "Print" against a print dialog matches the
+        "Printer" label (which OCR reads before the actual Print button), so the click
+        landed on the printer-name field instead of submitting the dialog, and the
+        automated pull silently stalled waiting for a Save dialog that never opened.
+
+        `taskbar_only=True` restricts every monitor's OCR to its bottom
+        `taskbar_height` px, so desktop/window CONTENT can't match at all — use this
+        for "does an app have a taskbar button" checks. Field-tested live: an
+        unscoped search for "Notepad" matched other on-screen content unpredictably
+        (whatever app happened to have that word visible), and a caller that force-
+        closes whatever it clicks (Alt+F4) on a false match can close an unrelated
+        window — this happened for real once, closing a chat app and an editor that
+        had nothing to do with the pull. Always prefer the narrowest scope that can
+        still find the target.
+
+        `top_only=True` is the same idea for a horizontal BAND instead of the
+        bottom strip: it searches `skip_top` to `skip_top + top_height` px from
+        each monitor's top edge, skipping the first `skip_top` px entirely -- use
+        this for window-chrome text (ribbon, address bar breadcrumb) that ALSO
+        appears again elsewhere in the same window and would otherwise ambiguously
+        match. Field-tested live, TWICE, on the same target: Explorer shows
+        "This PC" in the window's OWN TITLE BAR (y~0-30), the address bar
+        breadcrumb (y~150-260), AND the left navigation pane (can be hundreds of
+        px down) -- an unscoped search matched the sidebar entry (wrong), and
+        `top_only` with `skip_top=0` then matched the TITLE BAR instead (also
+        wrong -- clicking there does nothing, so the whole launch silently no-
+        opped with no exception anywhere). Only `skip_top` past the title bar
+        band lands on the breadcrumb specifically. Mutually exclusive with
+        `taskbar_only` -- if both are set, taskbar_only wins.
+
+        OCR runs PER MONITOR (screen=N) rather than one call spanning the whole
+        possibly-multi-monitor rect, then each monitor's LOCAL boxes are shifted back
+        to absolute by its own origin and merged. Field-tested live: a single OCR call
+        over a rect 2 monitors wide (3840x1080) returned systematically wrong box
+        coordinates for text on the right-hand monitor (an internal image-resize in
+        the OCR tool, presumably triggered past some pixel-count threshold) — the same
+        "Print" button OCR'd correctly at the right pixel position when scanned alone
+        at 1920x1080, but landed ~180px off when scanned as part of the full 3840-wide
+        span. That silently sent every dialog click (Print, Save, Landscape, …) to the
+        wrong spot, with the automated pull stalling waiting for a Save dialog that
+        never opened, while an interactive human click at the visually-obvious
+        coordinate worked immediately. Falls back to one whole-rect OCR call if
+        list_monitors() is unavailable. Returns None if not found / OCR fails.
         """
         needle = needle.lower()
-        left, top, w, h = await self.resolve_rect()
+        rect = await self.resolve_rect()
+        left, top, w, h = rect
+        monitors = await self._monitors_in_rect(rect)
+        lines: list[dict] = []
         try:
-            raw = await self._client.ocr(x=left, y=top, width=w, height=h)
-            data = json.loads(raw)
+            if monitors:
+                for mon in monitors:
+                    if taskbar_only:
+                        strip_h = min(taskbar_height, mon["height"])
+                        raw = await self._client.ocr(
+                            x=0, y=mon["height"] - strip_h,
+                            width=mon["width"], height=strip_h,
+                            screen=mon["index"],
+                        )
+                    elif top_only:
+                        band_top = min(skip_top, mon["height"])
+                        strip_h = min(top_height, mon["height"] - band_top)
+                        raw = await self._client.ocr(
+                            x=0, y=band_top, width=mon["width"], height=strip_h,
+                            screen=mon["index"],
+                        )
+                    else:
+                        raw = await self._client.ocr(screen=mon["index"])
+                    data = json.loads(raw)
+                    # `ocr(..., screen=N)` returns coordinates already relative to
+                    # that MONITOR's (0,0) — even when a sub-region (x,y,w,h) is
+                    # also passed to narrow the search area, e.g. the taskbar strip
+                    # above. Field-tested live: adding the strip's own y-offset a
+                    # second time here double-counted it, producing y values like
+                    # ~2082 on a 1080px-tall monitor (physically impossible) and
+                    # sending clicks to nowhere. Only mon["x"]/mon["y"] (the
+                    # monitor's own virtual-desktop origin) belong in the shift.
+                    ox, oy = mon["x"], mon["y"]
+                    for line in data.get("lines") or []:
+                        lines.append(_shift_ocr_box(line, ox, oy))
+            else:
+                if taskbar_only:
+                    strip_top, strip_h = top + max(0, h - taskbar_height), taskbar_height
+                elif top_only:
+                    band_top = top + min(skip_top, h)
+                    strip_top, strip_h = band_top, min(top_height, top + h - band_top)
+                else:
+                    strip_top, strip_h = top, h
+                raw = await self._client.ocr(x=left, y=strip_top, width=w, height=strip_h)
+                data = json.loads(raw)
+                lines = data.get("lines") or []
         except Exception:  # noqa: BLE001 — OCR/parse failure → caller falls back
             return None
-        for line in data.get("lines") or []:
+        for line in lines:
+            if (line.get("text") or "").strip().lower() == needle:
+                point = self._box_center(line)
+                if point:
+                    return point
+        for line in lines:
+            for word in line.get("words") or []:
+                if (word.get("text") or "").strip().lower() == needle:
+                    point = self._box_center(word)
+                    if point:
+                        return point
+        for line in lines:
             if needle in (line.get("text") or "").lower():
                 point = self._box_center(line)
                 if point:

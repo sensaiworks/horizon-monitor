@@ -139,6 +139,7 @@ async def _run_monitor(config: dict, dry_run: bool) -> None:
     async with HorizonMCPClient(
         server_path=mcp_cfg["server_path"],
         command=mcp_cfg["command"],
+        call_timeout_seconds=mcp_cfg.get("call_timeout_seconds", 90.0),
     ) as client:
         poller = Poller(
             client=client,
@@ -299,7 +300,10 @@ async def _run_remote(
         else:
             print(text)
 
-    async with HorizonMCPClient(mcp_cfg["server_path"], mcp_cfg["command"]) as client:
+    async with HorizonMCPClient(
+        mcp_cfg["server_path"], mcp_cfg["command"],
+        call_timeout_seconds=mcp_cfg.get("call_timeout_seconds", 90.0),
+    ) as client:
         c = RemoteController(
             client,
             focus_target=ctl.get("focus_target", "PVDI"),
@@ -464,7 +468,10 @@ async def _run_backfill(config: dict, chat_title: str, months: int | None,
     from src.backfill import ChatBackfiller
 
     mcp_cfg = config["mcp"]
-    async with HorizonMCPClient(mcp_cfg["server_path"], mcp_cfg["command"]) as client:
+    async with HorizonMCPClient(
+        mcp_cfg["server_path"], mcp_cfg["command"],
+        call_timeout_seconds=mcp_cfg.get("call_timeout_seconds", 90.0),
+    ) as client:
         bf = ChatBackfiller(config, on_log=lambda s: print(s, flush=True))
         print(f"backfill: {chat_title!r} (ingest={ingest}) — bring the chat to the front. "
               "Ctrl+C to stop", flush=True)
@@ -473,6 +480,445 @@ async def _run_backfill(config: dict, chat_title: str, months: int | None,
             screen=screen, ingest=ingest,
         )
         print(f"backfill: {result.summary()}", flush=True)
+
+
+@cli.command()
+@click.argument("remote_path")
+@click.option(
+    "--project", default="",
+    help="Subfolder under [pull].root_dir to group this file under (e.g. PAT)",
+)
+@click.option(
+    "--out", default="",
+    help="Local destination. Relative paths resolve under [pull].root_dir (and --project, "
+         "if given); absolute paths override entirely. Default: root_dir/[project/]basename.",
+)
+def pull(remote_path: str, project: str, out: str):
+    """Pull one file out of the remote via the printer-redirection channel (src/pull.py).
+
+    For VDIs that block clipboard copy-out, where `remote read-file` can't work at
+    all: prints the file from Notepad to a local PDF via a Horizon-redirected virtual
+    printer, then reconstructs the source text locally. Requires `pdftotext`
+    (poppler) on PATH. For a .py destination, reports whether the reconstruction
+    compiles rather than silently trusting it — always skim the result either way.
+
+    Lands under [pull].root_dir (a folder OUTSIDE any git repo, e.g. C:\\github\\Mizuho —
+    easy to open directly in VS Code, never at risk of being committed). Use --project to
+    keep separate remote projects from colliding in one flat folder.
+
+    \b
+    python main.py pull "C:\\git\\project\\src\\app.py" --project PAT
+    python main.py pull "C:\\git\\project\\README.md" --project PAT --out docs/README.md
+    """
+    config = load_config()
+    ctl = config.get("control", {})
+    if not ctl.get("enabled", False):
+        raise click.ClickException(
+            "Pull drives the remote — set [control].enabled = true in config.toml"
+        )
+    pull_cfg = config.get("pull", {})
+    root = Path(pull_cfg.get("root_dir") or (APP_DIR / "data" / "pulled"))
+    base = (root / project) if project else root
+    name = Path(remote_path.replace("\\", "/")).name
+    if out:
+        out_path = Path(out)
+        dest = out_path if out_path.is_absolute() else base / out_path
+    else:
+        dest = base / name
+    asyncio.run(_run_pull(config, remote_path, dest))
+
+
+async def _run_pull(config: dict, remote_path: str, dest: Path) -> None:
+    from src.mcp_client import HorizonMCPClient
+    from src.controller import RemoteController
+    from src.pull import ProjectPuller
+
+    mcp_cfg = config["mcp"]
+    ctl = config.get("control", {})
+    pull_cfg = config.get("pull", {})
+
+    async with HorizonMCPClient(
+        mcp_cfg["server_path"], mcp_cfg["command"],
+        call_timeout_seconds=mcp_cfg.get("call_timeout_seconds", 90.0),
+    ) as client:
+        c = RemoteController(
+            client,
+            focus_target=ctl.get("focus_target", "PVDI"),
+            launch_wait=ctl.get("launch_wait_seconds", 1.5),
+            clipboard_sync=ctl.get("clipboard_sync_seconds", 0.6),
+            copy_timeout=ctl.get("copy_timeout_seconds", 6.0),
+            screen=ctl.get("screen", 0),
+        )
+        puller = ProjectPuller(
+            c, client,
+            printer_name=pull_cfg.get("printer_name", "Microsoft Print to PDF"),
+            open_wait_seconds=pull_cfg.get("open_wait_seconds", 1.5),
+            print_wait_seconds=pull_cfg.get("print_wait_seconds", 0.8),
+            save_wait_seconds=pull_cfg.get("save_wait_seconds", 1.2),
+            save_poll_seconds=pull_cfg.get("save_poll_seconds", 0.5),
+            save_timeout_seconds=pull_cfg.get("save_timeout_seconds", 20.0),
+            address_bar_xy=(
+                (pull_cfg["address_bar_x"], pull_cfg["address_bar_y"])
+                if "address_bar_x" in pull_cfg and "address_bar_y" in pull_cfg
+                else None
+            ),
+            address_bar_screen=pull_cfg.get("address_bar_screen", 0),
+            clipboard_sync_seconds=pull_cfg.get(
+                "clipboard_sync_seconds", ctl.get("clipboard_sync_seconds", 0.6)
+            ),
+            yield_resume_seconds=pull_cfg.get("yield_resume_seconds", 30.0),
+            on_log=lambda s: print(s, flush=True),
+        )
+        print(f"pull: {remote_path} -> {dest}", flush=True)
+        result = await puller.pull_file(remote_path, dest)
+        status = "OK" if result.ok else "NEEDS REVIEW"
+        print(
+            f"pull: {status} — {result.local_path} ({result.chars} chars)"
+            f"{f' — {result.error}' if result.error else ''}",
+            flush=True,
+        )
+
+
+@cli.command(name="pull-project")
+@click.argument("project")
+@click.option(
+    "--root", default="",
+    help="Remote project root, e.g. \"C:\\\\git\\\\residesk\\\\PAT\". Required the first "
+         "time; later runs reuse the value cached in the project's manifest.",
+)
+@click.option(
+    "--dry-run", is_flag=True,
+    help="Discover + diff only — show what would be pulled/is gone, pull nothing.",
+)
+@click.option(
+    "--force", is_flag=True,
+    help="Ignore the cached manifest and re-pull every discovered file.",
+)
+def pull_project(project: str, root: str, dry_run: bool, force: bool):
+    """Discover and pull (or re-sync) a WHOLE remote project's code/text files.
+
+    Unlike `pull` (one file, path typed by hand), this lists the remote project's
+    file tree itself (via robocopy /L, falling back to `dir /s`), filters to
+    code/text files, and pulls only what's new or changed since the last run —
+    tracked in a manifest at <project_dir>/.horizon_pull_manifest.json. Re-run any
+    time to sync on demand; nothing here runs automatically.
+
+    \b
+    python main.py pull-project PAT --root "C:\\git\\residesk\\PAT"   # first run
+    python main.py pull-project PAT                                    # later: re-sync
+    python main.py pull-project PAT --dry-run                          # preview only
+    """
+    config = load_config()
+    ctl = config.get("control", {})
+    if not ctl.get("enabled", False):
+        raise click.ClickException(
+            "pull-project drives the remote — set [control].enabled = true in config.toml"
+        )
+    asyncio.run(_run_pull_project(config, project, root, dry_run, force))
+
+
+async def _run_pull_project(
+    config: dict, project: str, root_override: str, dry_run: bool, force: bool
+) -> None:
+    from src.mcp_client import HorizonMCPClient
+    from src.controller import RemoteController
+    from src.pull import ProjectPuller
+    from src.remote_tree import (
+        RemoteTreeLister, filter_entries, load_manifest, save_manifest,
+        diff_against_manifest,
+    )
+
+    mcp_cfg = config["mcp"]
+    ctl_cfg = config.get("control", {})
+    pull_cfg = config.get("pull", {})
+
+    root_dir = Path(pull_cfg.get("root_dir") or (APP_DIR / "data" / "pulled"))
+    project_dir = root_dir / project
+    manifest_path = project_dir / ".horizon_pull_manifest.json"
+    manifest = load_manifest(manifest_path)
+    remote_root = root_override or manifest.get("remote_root", "")
+    if not remote_root:
+        raise click.ClickException(
+            'No remote root known for this project yet — pass --root "C:\\path\\to\\project" '
+            "the first time."
+        )
+
+    async with HorizonMCPClient(
+        mcp_cfg["server_path"], mcp_cfg["command"],
+        call_timeout_seconds=mcp_cfg.get("call_timeout_seconds", 90.0),
+    ) as client:
+        c = RemoteController(
+            client,
+            focus_target=ctl_cfg.get("focus_target", "PVDI"),
+            launch_wait=ctl_cfg.get("launch_wait_seconds", 1.5),
+            clipboard_sync=ctl_cfg.get("clipboard_sync_seconds", 0.6),
+            copy_timeout=ctl_cfg.get("copy_timeout_seconds", 6.0),
+            screen=ctl_cfg.get("screen", 0),
+        )
+        puller = ProjectPuller(
+            c, client,
+            printer_name=pull_cfg.get("printer_name", "Microsoft Print to PDF"),
+            open_wait_seconds=pull_cfg.get("open_wait_seconds", 1.5),
+            print_wait_seconds=pull_cfg.get("print_wait_seconds", 0.8),
+            save_wait_seconds=pull_cfg.get("save_wait_seconds", 1.2),
+            save_poll_seconds=pull_cfg.get("save_poll_seconds", 0.5),
+            save_timeout_seconds=pull_cfg.get("save_timeout_seconds", 20.0),
+            address_bar_xy=(
+                (pull_cfg["address_bar_x"], pull_cfg["address_bar_y"])
+                if "address_bar_x" in pull_cfg and "address_bar_y" in pull_cfg
+                else None
+            ),
+            address_bar_screen=pull_cfg.get("address_bar_screen", 0),
+            clipboard_sync_seconds=pull_cfg.get(
+                "clipboard_sync_seconds", ctl_cfg.get("clipboard_sync_seconds", 0.6)
+            ),
+            yield_resume_seconds=pull_cfg.get("yield_resume_seconds", 30.0),
+            on_log=lambda s: print(s, flush=True),
+        )
+        lister = RemoteTreeLister(
+            puller,
+            list_wait_seconds=pull_cfg.get("tree_wait_seconds", 4.0),
+            on_log=lambda s: print(s, flush=True),
+        )
+
+        raw_entries = await lister.list_tree(remote_root, project_dir / "._tree_scratch")
+        if not raw_entries:
+            print(
+                "pull-project: no files discovered — check the remote root is correct "
+                "and an Explorer window is open/focused in the remote session, then "
+                "screenshot the VDI to see what happened",
+                flush=True,
+            )
+            return
+        entries = filter_entries(raw_entries, remote_root)
+        print(
+            f"pull-project: {len(entries)} code/text files match (of {len(raw_entries)} "
+            "total discovered)",
+            flush=True,
+        )
+
+        manifest_files = {} if force else manifest.get("files", {})
+        diff = diff_against_manifest(entries, manifest_files)
+        print(
+            f"pull-project: {len(diff.to_pull)} new/changed, {len(diff.unchanged)} "
+            f"unchanged, {len(diff.removed)} gone on remote",
+            flush=True,
+        )
+
+        if dry_run:
+            for rel in diff.to_pull:
+                print(f"  would pull: {rel}", flush=True)
+            for rel in diff.removed:
+                print(f"  gone on remote (kept locally): {rel}", flush=True)
+            return
+
+        by_rel = {e.relpath: e for e in entries}
+        updated_files = dict(manifest_files)
+        ok_count = review_count = fail_count = 0
+        for i, rel in enumerate(diff.to_pull, 1):
+            # Cooperative emergency stop: create APP_DIR/STOP (an empty file, any
+            # method — Explorer "New > Text Document" renamed, or `type nul >
+            # STOP` / `New-Item STOP`) and this loop notices it before the NEXT
+            # file and exits cleanly, saving progress already made. This exists
+            # because "stop" typed in chat is a REQUEST that has to be seen and
+            # acted on — it is not instant, and for a batch already running
+            # in the background there could be real delay before it's honored.
+            # A file check costs nothing and needs no cooperation from the
+            # agent's current turn at all.
+            stop_flag = APP_DIR / "STOP"
+            if stop_flag.exists():
+                stop_flag.unlink()
+                print(
+                    f"pull-project: STOP file found — halting after {i - 1}/"
+                    f"{len(diff.to_pull)} files this run (progress saved)",
+                    flush=True,
+                )
+                save_manifest(manifest_path, remote_root, updated_files)
+                return
+            e = by_rel[rel]
+            remote_path = remote_root.rstrip("\\") + "\\" + rel.replace("/", "\\")
+            local_dest = project_dir / rel
+            print(f"=== [{i}/{len(diff.to_pull)}] {rel} ===", flush=True)
+            result = await puller.pull_file(remote_path, local_dest)
+            if result.chars > 0:
+                # File actually landed on disk — record it so a re-sync doesn't keep
+                # re-pulling it, even if it needs manual review (didn't compile).
+                updated_files[rel] = {"size": e.size, "mtime": e.mtime}
+                if result.ok:
+                    ok_count += 1
+                else:
+                    review_count += 1
+            else:
+                fail_count += 1  # nothing written — leave off the manifest, retry next sync
+            save_manifest(manifest_path, remote_root, updated_files)
+
+        print(
+            f"pull-project: done — {ok_count} ok, {review_count} needs review, "
+            f"{fail_count} failed (will retry next sync), {len(diff.unchanged)} unchanged",
+            flush=True,
+        )
+        if diff.removed:
+            print(
+                f"pull-project: {len(diff.removed)} file(s) gone on remote "
+                "(left in place locally):",
+                flush=True,
+            )
+            for rel in diff.removed:
+                print(f"  {rel}", flush=True)
+
+
+@cli.command(name="pull-payload")
+@click.argument("project")
+@click.option(
+    "--root", required=True,
+    help="Remote project root, e.g. \"C:\\\\git\\\\residesk\\\\PAT\".",
+)
+@click.option(
+    "--resume", is_flag=True,
+    help="Carry on from an interrupted run: skip the remote export, reuse the "
+         "existing staging dir, and reprint only the export files whose local PDF "
+         "is missing or fails verification.",
+)
+@click.option(
+    "--keep-staging", is_flag=True,
+    help="Don't delete the remote staging dir after a successful pull (so a later "
+         "--resume can still reuse it).",
+)
+@click.option(
+    "--max-chars-per-file", type=int, default=None,
+    help="Override [pull_payload].max_chars_per_file for this run. Bigger = fewer "
+         "print jobs = fewer chances to fail, at the cost of a longer single print. "
+         "This is the calibration knob.",
+)
+@click.option(
+    "--chunk-chars", type=int, default=None,
+    help="Override [pull_payload].chunk_chars for this run (base64 chars per "
+         "individually-hashed chunk).",
+)
+def pull_payload(project: str, root: str, resume: bool, keep_staging: bool,
+                 max_chars_per_file: int | None, chunk_chars: int | None):
+    """Byte-exact whole-project pull via a single base64 payload print.
+
+    Unlike `pull-project` (one fragile print+reconstruct per file, RETIRED as a
+    batch transport — see DECISIONS.md), this zips the whole remote project,
+    base64-encodes it, and prints that as one or a few SHA-256-verified text files
+    — immune to the indentation/line-wrap guessing that made the old pipeline
+    unreliable. Decoded and verified locally; a failed chunk names exactly which
+    export file to reprint rather than silently producing wrong output.
+
+    Verified live 2026-08-18 against "Pricing Tool" (11 files incl. .xlsx/.PNG
+    binaries, 1,469,364 zip bytes, all hashes clean) — see DECISIONS.md.
+
+    Not incremental across pulls — each run fetches the whole project. It IS
+    resumable WITHIN a run: if printing fails partway, re-run with --resume and
+    only the missing/unverifiable export files are reprinted.
+
+    \b
+    python main.py pull-payload PAT --root "C:\\git\\residesk\\PAT"
+    python main.py pull-payload PAT --root "C:\\git\\residesk\\PAT" --resume
+    """
+    config = load_config()
+    ctl = config.get("control", {})
+    if not ctl.get("enabled", False):
+        raise click.ClickException(
+            "pull-payload drives the remote — set [control].enabled = true in config.toml"
+        )
+    asyncio.run(_run_pull_payload(
+        config, project, root, resume=resume, keep_staging=keep_staging,
+        max_chars_per_file=max_chars_per_file, chunk_chars=chunk_chars,
+    ))
+
+
+async def _run_pull_payload(
+    config: dict, project: str, remote_root: str, *, resume: bool = False,
+    keep_staging: bool = False, max_chars_per_file: int | None = None,
+    chunk_chars: int | None = None,
+) -> None:
+    from src.mcp_client import HorizonMCPClient
+    from src.controller import RemoteController
+    from src.pull import ProjectPuller
+    from src.pull_payload import PayloadPuller
+
+    mcp_cfg = config["mcp"]
+    ctl_cfg = config.get("control", {})
+    pull_cfg = config.get("pull", {})
+    payload_cfg = config.get("pull_payload", {})
+
+    root_dir = Path(pull_cfg.get("root_dir") or (APP_DIR / "data" / "pulled"))
+    project_dir = root_dir / project
+
+    async with HorizonMCPClient(
+        mcp_cfg["server_path"], mcp_cfg["command"],
+        call_timeout_seconds=mcp_cfg.get("call_timeout_seconds", 90.0),
+    ) as client:
+        c = RemoteController(
+            client,
+            focus_target=ctl_cfg.get("focus_target", "PVDI"),
+            launch_wait=ctl_cfg.get("launch_wait_seconds", 1.5),
+            clipboard_sync=ctl_cfg.get("clipboard_sync_seconds", 0.6),
+            copy_timeout=ctl_cfg.get("copy_timeout_seconds", 6.0),
+            screen=ctl_cfg.get("screen", 0),
+        )
+        puller = ProjectPuller(
+            c, client,
+            printer_name=pull_cfg.get("printer_name", "Microsoft Print to PDF"),
+            open_wait_seconds=pull_cfg.get("open_wait_seconds", 1.5),
+            print_wait_seconds=pull_cfg.get("print_wait_seconds", 0.8),
+            save_wait_seconds=pull_cfg.get("save_wait_seconds", 1.2),
+            save_poll_seconds=pull_cfg.get("save_poll_seconds", 0.5),
+            save_timeout_seconds=pull_cfg.get("save_timeout_seconds", 20.0),
+            address_bar_xy=(
+                (pull_cfg["address_bar_x"], pull_cfg["address_bar_y"])
+                if "address_bar_x" in pull_cfg and "address_bar_y" in pull_cfg
+                else None
+            ),
+            address_bar_screen=pull_cfg.get("address_bar_screen", 0),
+            clipboard_sync_seconds=pull_cfg.get(
+                "clipboard_sync_seconds", ctl_cfg.get("clipboard_sync_seconds", 0.6)
+            ),
+            yield_resume_seconds=pull_cfg.get("yield_resume_seconds", 30.0),
+            on_log=lambda s: print(s, flush=True),
+        )
+        payload_puller = PayloadPuller(
+            puller,
+            chunk_chars=chunk_chars or payload_cfg.get("chunk_chars", 4000),
+            max_chars_per_file=(
+                max_chars_per_file or payload_cfg.get("max_chars_per_file", 200_000)
+            ),
+            max_file_bytes=payload_cfg.get("max_file_bytes", 5 * 1024 * 1024),
+            exclude_dirs=payload_cfg.get("exclude_dirs"),
+            staging_dir_name=payload_cfg.get("staging_dir_name", "_archive"),
+            manifest_poll_seconds=payload_cfg.get("manifest_poll_seconds", 6.0),
+            manifest_timeout_seconds=payload_cfg.get("manifest_timeout_seconds", 300.0),
+            stop_flag_path=APP_DIR / "STOP",
+            on_log=lambda s: print(s, flush=True),
+        )
+
+        print(f"pull-payload: {project} <- {remote_root}", flush=True)
+        try:
+            result = await payload_puller.pull_project_payload(
+                remote_root, project_dir, project_name=project,
+                resume=resume, keep_staging=keep_staging,
+            )
+        except Exception as exc:
+            # The remote staging dir is intact (cleanup only runs on success) and
+            # every PDF printed so far is on local disk, so the retry is cheap.
+            raise click.ClickException(
+                f"{exc}\n\nThe remote staging dir and every export PDF printed so "
+                f"far were kept. Re-run the SAME command with --resume to reprint "
+                f"only what's missing instead of starting over."
+            ) from exc
+        print(
+            f"pull-payload: done — {len(result.files)} file(s) extracted to "
+            f"{result.local_dest} ({result.printed} printed, {result.reused} reused)",
+            flush=True,
+        )
+        if result.completeness is not None and not result.completeness.ok:
+            print(
+                "pull-payload: WARNING — the bytes are SHA-256 proven, but the "
+                "completeness check did not come back clean (see above).",
+                flush=True,
+            )
 
 
 @cli.command()

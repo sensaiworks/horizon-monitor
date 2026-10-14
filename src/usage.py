@@ -24,6 +24,11 @@ _DEFAULT_PRICING: dict[str, tuple[float, float]] = {
     "claude-haiku-4-5-20251001": (1.00, 5.00),
     "claude-sonnet-4-6": (3.00, 15.00),
     "claude-opus-4-8": (5.00, 25.00),
+    # Claude 5 family (current config defaults). Rates below carry over the prior tier's
+    # pricing as a ballpark — verify and override via [pricing] in config.toml if it matters.
+    "claude-haiku-5-5": (1.00, 5.00),
+    "claude-sonnet-5-5": (3.00, 15.00),
+    "claude-opus-5-5": (5.00, 25.00),
 }
 _CACHE_READ_MULT = 0.1     # cached-prefix reads bill ~0.1x the input rate
 _CACHE_WRITE_MULT = 1.25   # 5-minute cache writes bill ~1.25x the input rate
