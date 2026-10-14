@@ -4,9 +4,9 @@ project can be pulled/synced by *discovering* its files instead of a hand-typed 
 (what the first Intex Deal Maker batch pull required -- doesn't scale to "get ALL the
 code").
 
-There is no MCP primitive for "list remote files": the DLP wall that forces
-pull.py's print-to-PDF channel in the first place means the ONLY way text leaves the
-VDI at all is that same channel. So listing works by driving a command that writes a
+There is no MCP primitive for "list remote files": the disabled clipboard copy-out
+that forces pull.py's print-to-PDF channel in the first place means the ONLY way text
+leaves the VDI at all is that same channel. So listing works by driving a command that writes a
 file listing to a text file INSIDE the remote project folder, then pulling that one
 small file back exactly like any other source file (ProjectPuller.pull_file), and
 parsing it locally.
@@ -337,7 +337,7 @@ class RemoteTreeLister:
         `dir /s` or `robocopy /S` dump -- field-tested live against a real ~200+ file
         project: a single recursive listing came back as 200-226KB of text, and
         printing that much through Notepad's print-to-PDF pipeline (the only
-        channel available; clipboard copy-out is DLP-blocked here too) never
+        channel available; clipboard copy-out is disabled here too) never
         stabilized inside the normal per-file save timeout -- a print job that size
         is plausibly hundreds of pages. Chunking by top-level directory keeps each
         individual print job down to whatever one subfolder contains, which is

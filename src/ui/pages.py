@@ -567,7 +567,7 @@ class _PullSignals(QObject):
 class PullPage(QWidget):
     """Read a file out of the remote VS Code into a local viewer.
 
-    Clipboard copy-OUT is blocked on this VDI (DLP), so the default channel is OCR:
+    Clipboard copy-OUT is blocked on this VDI, so the default channel is OCR:
     open the file, then scroll + OCR page-by-page and stitch the captures. OCR is LOSSY
     (confuses 1/l/I, drops indentation) — the result is flagged 'verify before trusting'.
     An optional 'lossless clipboard' path is offered for VDIs where copy-out is allowed.

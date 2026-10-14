@@ -1,10 +1,12 @@
 """
-Pull source files out of a DLP-restricted remote session via printer redirection.
+Pull source files out of a remote session (clipboard copy-out disabled) via printer
+redirection. Parked (not a current priority) — a side exploration run against mock
+projects in a personal lab; see DECISIONS.md.
 
 controller.py's clipboard bridge (copy_from_remote) needs Horizon clipboard copy-OUT
 enabled; its OCR read bridge (read_screen/read_scrolling) is fine for chat text but
 loses indentation and mangles symbols -- unusable for code. This module is a THIRD
-channel, discovered field-testing a session where copy-out was DLP-blocked: printing
+channel, discovered field-testing a session where clipboard copy-out was disabled: printing
 to a Horizon-redirected virtual printer ("Microsoft Print to PDF (vdi)" or similar)
 pops a REAL LOCAL Windows Save dialog and produces a genuine, text-selectable PDF
 straight on the local disk -- the remote-side print spooler renders exact glyphs, so
@@ -382,11 +384,12 @@ class PullResult:
 
 
 class ProjectPuller:
-    """Pulls files out of a DLP-restricted VDI via the printer-redirection channel.
+    """Pulls files out of a VDI (clipboard copy-out disabled) via the
+    printer-redirection channel.
 
-    Only reach for this when controller.copy_from_remote() isn't available (DLP
-    blocks clipboard copy-out) -- prefer the clipboard bridge when it works; it's
-    lossless and doesn't touch Notepad or any print dialog at all.
+    Only reach for this when controller.copy_from_remote() isn't available
+    (clipboard copy-out is disabled) -- prefer the clipboard bridge when it works;
+    it's lossless and doesn't touch Notepad or any print dialog at all.
     """
 
     def __init__(

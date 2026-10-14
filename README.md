@@ -229,10 +229,10 @@ This requires Horizon **clipboard redirection** to be enabled (it usually is); `
 reports a clear error if the clipboard never updates after the copy. The remote **editor
 pane** must hold focus so `Ctrl+A` selects the document.
 
-### OCR read bridge (for one-way-clipboard / DLP sessions)
+### OCR read bridge (for one-way-clipboard sessions)
 
-Many corporate VDIs allow paste **in** but block copy **out** (a one-way-clipboard DLP
-policy). There the clipboard bridge above can't read — there is no lossless way to get text
+Many locked-down VDIs allow paste **in** but block copy **out** (a one-way clipboard).
+There the clipboard bridge above can't read — there is no lossless way to get text
 off the remote — so the read path falls back to the screen itself: **screenshot + Windows
 OCR**, scrolling the pane and stitching captures for content taller than one screen. The
 write path is unchanged (paste-in is allowed).

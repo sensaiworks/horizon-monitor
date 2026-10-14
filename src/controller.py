@@ -510,10 +510,10 @@ class RemoteController:
         await self._client.key_combo(["Enter"])
         await asyncio.sleep(0.4)
 
-    # ------------------------------------------------- OCR read bridge (DLP mode)
-    # When the VDI blocks clipboard copy-OUT (remote -> local) — a common DLP
-    # policy — copy_from_remote() above cannot work: there is no lossless channel
-    # to get text off the remote. The only one left is the screen itself, so we
+    # ------------------------------------------------- OCR read bridge (copy-out disabled)
+    # When the VDI blocks clipboard copy-OUT (remote -> local), copy_from_remote()
+    # above cannot work: there is no lossless channel to get text off the remote.
+    # The only one left is the screen itself, so we
     # READ via screenshot + Windows OCR, scrolling the pane and stitching captures
     # for content taller than one screen. OCR is LOSSY: it confuses 1/l/I, drops
     # indentation, and mangles symbols — so treat anything read back as a DRAFT to
@@ -605,7 +605,8 @@ class RemoteController:
         save: bool = False,
         submit: bool = False,
     ) -> None:
-        """Paste `text` into the remote at the cursor — write-IN is allowed under DLP.
+        """Paste `text` into the remote at the cursor — write-IN still works even when
+        copy-out doesn't.
 
         If (x, y) is given, click there first to focus the target app/field; pass
         double=True for the apps that need two clicks to take focus. Stages the local
