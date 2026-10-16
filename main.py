@@ -482,6 +482,64 @@ async def _run_backfill(config: dict, chat_title: str, months: int | None,
         print(f"backfill: {result.summary()}", flush=True)
 
 
+@cli.command(name="read-doc")
+@click.option("--pages", type=int, default=None,
+              help="Safety cap on viewports to page through (default [doc_reader].max_pages).")
+@click.option("--screen", type=int, default=None,
+              help="VDI monitor the document is on (default [doc_reader].screen).")
+@click.option("--out", type=click.Path(dir_okay=False), default=None,
+              help="Write the text to this file instead of printing it.")
+@click.option("--force", is_flag=True,
+              help="Skip the screen-share safety check. Only if you KNOW nothing is being shared.")
+def read_doc(pages: int | None, screen: int | None, out: str | None, force: bool):
+    """Read the front-most open document in the VDI into plain text.
+
+    Pages the document top->bottom with the keyboard (PageDown - the mouse wheel
+    barely moves this VDI) and OCRs each viewport (FREE - no Claude API), then
+    stitches the overlapping viewports into one text. Open the document and
+    MAXIMIZE IT ALONE on its monitor first, or a PageDown can land on another
+    window. Refuses to run while a Teams/Webex screen share is active.
+
+    \b
+    python main.py read-doc
+    python main.py read-doc --out notes.txt
+    """
+    config = load_config()
+    ctl = config.get("control", {})
+    if not ctl.get("enabled", False):
+        raise click.ClickException(
+            "read-doc drives the remote — set [control].enabled = true in config.toml"
+        )
+    asyncio.run(_run_read_doc(config, pages, screen, out, force))
+
+
+async def _run_read_doc(config: dict, pages: int | None, screen: int | None,
+                        out: str | None, force: bool) -> None:
+    from src.mcp_client import HorizonMCPClient
+    from src.doc_reader import DocReader, DocReadBlocked
+
+    mcp_cfg = config["mcp"]
+    async with HorizonMCPClient(
+        mcp_cfg["server_path"], mcp_cfg["command"],
+        call_timeout_seconds=mcp_cfg.get("call_timeout_seconds", 90.0),
+    ) as client:
+        reader = DocReader(config, on_log=lambda s: print(s, flush=True))
+        print("read-doc: bring the document to the front and MAXIMIZE it alone. "
+              "Ctrl+C to stop", flush=True)
+        try:
+            result = await reader.read_frontmost(
+                client, max_pages=pages, screen=screen, force=force)
+        except DocReadBlocked as exc:
+            raise click.ClickException(str(exc))
+        print(f"read-doc: {result.summary()}", flush=True)
+        if out:
+            with open(out, "w", encoding="utf-8") as fh:
+                fh.write(result.text)
+            print(f"read-doc: wrote {result.chars} chars to {out}", flush=True)
+        else:
+            print("\n" + result.text, flush=True)
+
+
 @cli.command()
 @click.argument("remote_path")
 @click.option(

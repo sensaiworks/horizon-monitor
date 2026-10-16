@@ -145,6 +145,27 @@ stall_limit     = 8                # near-zero-move frames in a row before we ca
 max_frames      = 700              # safety cap on total frames
 months          = 6                # stop once messages older than this many months appear
 
+[doc_reader]
+# Read a whole on-screen DOCUMENT (Word, a PDF viewer, Notepad, VS Code...) open in
+# the VDI into plain text.  `python main.py read-doc`.  Unlike backfill (which uses the
+# mouse wheel on a Teams chat), this PAGES with the keyboard: on this VDI the wheel
+# barely moves an open document, but PageDown advances one viewport every time. It OCRs
+# each viewport (FREE, offline, NO Claude API) and stitches them, stopping when a page
+# stops changing (bottom reached). Drives the remote, so needs [control].enabled = true.
+# Open the document and MAXIMIZE IT ALONE on its monitor first, or a PageDown can land
+# on an overlapping window (a Teams chat surfacing over Word was the real failure here).
+screen      = 0                    # VDI monitor the document is on (list_monitors index)
+region      = [540, 185, 850, 830] # document-body rect on that screen: x, y, w, h
+                                   # (excludes the Word ribbon at top and status bar at bottom)
+max_pages   = 60                   # safety cap on viewports to page through
+settle_ms   = 500                  # wait after Ctrl+Home before the first OCR
+page_wait_ms = 450                 # wait after each PageDown for the render to settle
+focus_click = true                 # click the top page margin to give the doc keyboard focus
+# SAFETY: read-doc refuses to run while a Teams/Webex screen share is active, so paging a
+# private document isn't broadcast to a call. It OCRs each monitor for these banners first;
+# `--force` skips the check (only when you KNOW nothing is being shared).
+share_flags = ["sharing your screen", "stop sharing", "you're sharing", "you're presenting"]
+
 [pull]
 # Pull source files out of the remote via the printer-redirection channel (src/pull.py)
 # -- for VDIs that block clipboard copy-out, where controller.copy_from_remote() can't
