@@ -166,6 +166,34 @@ focus_click = true                 # click the top page margin to give the doc k
 # `--force` skips the check (only when you KNOW nothing is being shared).
 share_flags = ["sharing your screen", "stop sharing", "you're sharing", "you're presenting"]
 
+[mail]
+# Read a whole Outlook FOLDER in the VDI structurally -- `python main.py read-mail
+# "LoanCAD"` (src/outlook_reader.py). Instead of clicking each email and OCR-ing the
+# reading pane, it deposits one readable PowerShell script (src/remote_scripts/
+# outlook_folder_dump.ps1) and runs it with `-File`: the script attaches to the running
+# Outlook via COM, walks the folder newest-first, and writes Received/From/To/Subject/
+# Body to a text file, then opens it in Notepad. The local side waits for that Notepad
+# window, maximizes it, and reads it back with the same keyboard-page + OCR reader as
+# read-doc (clipboard copy-OUT is blocked on this VDI, so OCR is the only way back).
+# FREE -- no Claude API. `--ingest` stores the messages in SQLite + ChromaDB so the Ask
+# tab answers over them later. Drives the remote, so needs [control].enabled = true,
+# and refuses while a screen share is active. Open a File Explorer window in the VDI
+# first (every remote action types into its address bar).
+folder          = "Inbox"            # default folder when none is given on the CLI
+# Remote working dir for the script + dump. Must ALREADY EXIST (Notepad's Save-As can't
+# create folders) and contain NO SPACES (keeps the launch command quote-free).
+remote_dir      = "C:\\Temp"
+max_items       = 200                # newest N messages per run
+body_max_chars  = 4000               # cap each body (long threads otherwise dominate)
+dump_timeout_seconds = 120.0         # give up if the dump never appears on screen
+poll_seconds    = 3.0                # how often to OCR for the dump header while waiting
+maximize_wait_ms = 800               # after Alt+Space, X -- let Notepad redraw maximized
+# Notepad body rect on the VDI monitor once maximized (x, y, w, h) -- Notepad has no
+# ribbon, so this is wider/taller than [doc_reader].region. Default fits 1920x1080.
+region          = [20, 90, 1880, 950]
+max_pages       = 200                # safety cap on viewports (a 200-item dump is long)
+# Local copy of the read-back text lands in data/mail/<folder>_<date>.txt unless --out.
+
 [pull]
 # Pull source files out of the remote via the printer-redirection channel (src/pull.py)
 # -- for VDIs that block clipboard copy-out, where controller.copy_from_remote() can't

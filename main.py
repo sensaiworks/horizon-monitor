@@ -540,6 +540,107 @@ async def _run_read_doc(config: dict, pages: int | None, screen: int | None,
             print("\n" + result.text, flush=True)
 
 
+@cli.command(name="read-mail")
+@click.argument("folder", required=False, default=None)
+@click.option("--out", type=click.Path(dir_okay=False), default=None,
+              help="Write the dump text here (default data/mail/<folder>_<date>.txt).")
+@click.option("--ingest", is_flag=True,
+              help="Also store the messages in SQLite + ChromaDB (Ask tab answers over them).")
+@click.option("--max-items", type=int, default=None,
+              help="Newest N messages to dump (default [mail].max_items).")
+@click.option("--force", is_flag=True,
+              help="Skip the screen-share safety check. Only if you KNOW nothing is being shared.")
+def read_mail(folder: str | None, out: str | None, ingest: bool,
+              max_items: int | None, force: bool):
+    """Read a whole Outlook folder in the VDI structurally (no per-email OCR).
+
+    Deposits one readable PowerShell script into the VDI and runs it with -File:
+    it attaches to the running Outlook via COM, walks FOLDER newest-first, writes
+    Received/From/To/Subject/Body to a text file and opens it in Notepad. That
+    window is then paged + OCR'd back like read-doc (FREE - no Claude API).
+    Open a File Explorer window in the VDI first. Refuses while a screen share
+    is active. Default FOLDER is [mail].folder.
+
+    \b
+    python main.py read-mail "LoanCAD"
+    python main.py read-mail "LoanCAD" --out loancad.txt --ingest
+    """
+    config = load_config()
+    ctl = config.get("control", {})
+    if not ctl.get("enabled", False):
+        raise click.ClickException(
+            "read-mail drives the remote — set [control].enabled = true in config.toml"
+        )
+    asyncio.run(_run_read_mail(config, folder, out, ingest, max_items, force))
+
+
+async def _run_read_mail(config: dict, folder: str | None, out: str | None,
+                         ingest: bool, max_items: int | None, force: bool) -> None:
+    from src.mcp_client import HorizonMCPClient
+    from src.controller import RemoteController
+    from src.pull import ProjectPuller
+    from src.doc_reader import DocReadBlocked
+    from src.outlook_reader import OutlookReader, folder_slug
+
+    mcp_cfg = config["mcp"]
+    ctl = config.get("control", {})
+    pull_cfg = config.get("pull", {})
+    log = lambda s: print(s, flush=True)  # noqa: E731
+
+    async with HorizonMCPClient(
+        mcp_cfg["server_path"], mcp_cfg["command"],
+        call_timeout_seconds=mcp_cfg.get("call_timeout_seconds", 90.0),
+    ) as client:
+        c = RemoteController(
+            client,
+            focus_target=ctl.get("focus_target", "PVDI"),
+            launch_wait=ctl.get("launch_wait_seconds", 1.5),
+            clipboard_sync=ctl.get("clipboard_sync_seconds", 0.6),
+            copy_timeout=ctl.get("copy_timeout_seconds", 6.0),
+            screen=ctl.get("screen", 0),
+        )
+        # Same Explorer-address-bar launch surface pull/pull-payload use; only the
+        # deposit + run_remote_command paths are exercised here, never printing.
+        puller = ProjectPuller(
+            c, client,
+            open_wait_seconds=pull_cfg.get("open_wait_seconds", 1.5),
+            save_wait_seconds=pull_cfg.get("save_wait_seconds", 1.2),
+            address_bar_xy=(
+                (pull_cfg["address_bar_x"], pull_cfg["address_bar_y"])
+                if "address_bar_x" in pull_cfg and "address_bar_y" in pull_cfg
+                else None
+            ),
+            address_bar_screen=pull_cfg.get("address_bar_screen", 0),
+            clipboard_sync_seconds=pull_cfg.get(
+                "clipboard_sync_seconds", ctl.get("clipboard_sync_seconds", 0.6)
+            ),
+            yield_resume_seconds=pull_cfg.get("yield_resume_seconds", 30.0),
+            on_log=log,
+        )
+        reader = OutlookReader(config, on_log=log)
+        target = folder or config.get("mail", {}).get("folder", "Inbox")
+        print(f"read-mail: {target!r} — open a File Explorer window in the VDI and keep "
+              "your hands off the keyboard. Ctrl+C to stop", flush=True)
+        try:
+            result = await reader.read_folder(
+                puller, c, client, target, max_items=max_items, force=force)
+        except DocReadBlocked as exc:
+            raise click.ClickException(str(exc))
+
+        dest = Path(out) if out else (
+            APP_DIR / "data" / "mail"
+            / f"{folder_slug(target)}_{datetime.now():%Y%m%d_%H%M}.txt"
+        )
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(result.text, encoding="utf-8")
+        print(f"read-mail: wrote {len(result.text)} chars to {dest}", flush=True)
+
+        if ingest and result.parse.events:
+            rows, vectors = reader.ingest(result.parse.events)
+            result.stored_rows, result.stored_vectors = rows, vectors
+        print(f"read-mail: {result.summary()}", flush=True)
+
+
 @cli.command()
 @click.argument("remote_path")
 @click.option(
